@@ -2,7 +2,7 @@
 
 ## 概要
 
-- **技術スタック**：Bun + TypeScript + @modelcontextprotocol/sdk
+- **技術スタック**：TypeScript（tsx + Node.js）+ @modelcontextprotocol/sdk
 - **役割**：Claude Code と ブローカー間のブリッジ
 - **ポート**：起動時にOSが自動割り当て（ランダム空きポート）
 - **セッションID**：ロール名 + 連番（例：backend-1, frontend-1）
@@ -319,7 +319,7 @@ my-project/
 {
   "mcpServers": {
     "claude-peers": {
-      "command": "bun",
+      "command": "tsx",
       "args": [
         "/path/to/claude-peers/channel-server.ts",
         "--role", "dispatcher",
@@ -336,7 +336,7 @@ my-project/
 {
   "mcpServers": {
     "claude-peers": {
-      "command": "bun",
+      "command": "tsx",
       "args": [
         "/path/to/claude-peers/channel-server.ts",
         "--role", "worker",
