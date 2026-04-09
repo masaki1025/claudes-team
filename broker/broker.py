@@ -172,11 +172,18 @@ async def register_session(req: SessionRegister):
 @app.delete("/sessions/{session_id}")
 async def delete_session(session_id: str):
     conn = await get_db()
-    found = await db.delete_session(conn, session_id)
-    if not found:
-        error_response("SESSION_NOT_FOUND", "セッションが見つかりません", 404)
-    # Release locks held by this session
-    await db.release_session_locks(conn, session_id)
+    # Delete session and release its locks atomically
+    await conn.execute("BEGIN IMMEDIATE")
+    try:
+        cursor = await conn.execute("DELETE FROM peers WHERE session_id = ?", (session_id,))
+        if cursor.rowcount == 0:
+            await conn.execute("ROLLBACK")
+            error_response("SESSION_NOT_FOUND", "セッションが見つかりません", 404)
+        await conn.execute("DELETE FROM file_locks WHERE session_id = ?", (session_id,))
+        await conn.commit()
+    except Exception:
+        await conn.execute("ROLLBACK")
+        raise
     logger.info(f"Session deleted: {session_id}")
     return {"status": "ok"}
 
@@ -293,6 +300,7 @@ async def broadcast_message(req: BroadcastSend):
     sessions = await db.get_sessions(conn, namespace)
 
     delivered_to = []
+    failed_to = []
     for s in sessions:
         if s["session_id"] == req.from_id:
             continue  # Don't send to self
@@ -310,9 +318,14 @@ async def broadcast_message(req: BroadcastSend):
         success = await deliver_to_channel(s["channel_url"], payload)
         if success:
             delivered_to.append(s["session_id"])
+        else:
+            failed_to.append(s["session_id"])
 
-    logger.info(f"Broadcast from {req.from_id} to {delivered_to}")
-    return {"status": "ok", "delivered_to": delivered_to}
+    logger.info(f"Broadcast from {req.from_id}: delivered={delivered_to}, failed={failed_to}")
+    result: dict = {"status": "ok", "delivered_to": delivered_to}
+    if failed_to:
+        result["warning"] = f"以下のセッションへの配信に失敗しました: {', '.join(failed_to)}"
+    return result
 
 
 @app.get("/messages/{session_id}")

@@ -177,10 +177,23 @@ async function main() {
   const httpServer = http.createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/push") {
       let body = "";
+      let aborted = false;
+
+      req.on("error", (err) => {
+        aborted = true;
+        log(`Push request stream error: ${err.message}`);
+        if (!res.headersSent) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ status: "error", message: err.message }));
+        }
+      });
+
       req.on("data", (chunk: Buffer) => {
         body += chunk.toString();
       });
+
       req.on("end", async () => {
+        if (aborted) return;
         try {
           const payload: IncomingPayload = JSON.parse(body);
 
@@ -204,8 +217,10 @@ async function main() {
           res.end(JSON.stringify({ status: "ok" }));
         } catch (err: any) {
           log(`Push error: ${err.message}`);
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ status: "error", message: err.message }));
+          if (!res.headersSent) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ status: "error", message: err.message }));
+          }
         }
       });
     } else {

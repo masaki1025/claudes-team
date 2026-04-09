@@ -192,16 +192,22 @@ async def get_stale_sessions(db: aiosqlite.Connection, timeout_seconds: int = 60
 
 
 async def cleanup_stale_sessions(db: aiosqlite.Connection, timeout_seconds: int = 60) -> list[str]:
-    """Remove stale sessions and their locks. Returns list of removed session_ids."""
+    """Remove stale sessions and their locks atomically. Returns list of removed session_ids."""
     stale = await get_stale_sessions(db, timeout_seconds)
+    if not stale:
+        return []
     removed = []
-    for s in stale:
-        sid = s["session_id"]
-        await db.execute("DELETE FROM peers WHERE session_id = ?", (sid,))
-        await db.execute("DELETE FROM file_locks WHERE session_id = ?", (sid,))
-        removed.append(sid)
-    if removed:
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        for s in stale:
+            sid = s["session_id"]
+            await db.execute("DELETE FROM peers WHERE session_id = ?", (sid,))
+            await db.execute("DELETE FROM file_locks WHERE session_id = ?", (sid,))
+            removed.append(sid)
         await db.commit()
+    except Exception:
+        await db.execute("ROLLBACK")
+        raise
     return removed
 
 
@@ -312,7 +318,7 @@ async def release_lock(db: aiosqlite.Connection, session_id: str, file_path: str
 async def get_locks(db: aiosqlite.Connection, namespace: str) -> list[dict]:
     """Get all locks in a namespace."""
     cursor = await db.execute(
-        """SELECT fl.file_path, fl.session_id, p.role, fl.acquired_at, fl.expires_at
+        """SELECT fl.file_path, fl.session_id, COALESCE(p.role, 'unknown') as role, fl.acquired_at, fl.expires_at
            FROM file_locks fl
            LEFT JOIN peers p ON fl.session_id = p.session_id
            WHERE fl.namespace = ?""",
