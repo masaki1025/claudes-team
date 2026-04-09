@@ -1,7 +1,8 @@
 param(
   [string]$project = (Split-Path -Leaf (Get-Location)),
   [int]$workers = 3,
-  [string]$mode = "HYBRID"
+  [string]$mode = "HYBRID",
+  [switch]$split
 )
 
 $brokerUrl = "http://localhost:7799"
@@ -15,6 +16,7 @@ Write-Host "claude-peers を起動します..." -ForegroundColor Cyan
 Write-Host "  プロジェクト : $project" -ForegroundColor Cyan
 Write-Host "  Worker数     : $workers" -ForegroundColor Cyan
 Write-Host "  モード       : $mode" -ForegroundColor Cyan
+Write-Host "  表示         : $(if ($split) { '分割表示' } else { 'タブ表示' })" -ForegroundColor Cyan
 Write-Host ""
 
 # Step 1: ブローカー起動
@@ -107,12 +109,34 @@ if (-not (Get-Command wt -ErrorAction SilentlyContinue)) {
   exit 1
 }
 
-# Build Windows Terminal command line as a single string (wt uses `;` delimiters)
+# Build Windows Terminal command line
 $claudeCmd = "claude --dangerously-load-development-channels server:claude-peers"
-$wtCmd = "new-tab --title `"Dispatcher`" --startingDirectory `"$dispatcherDir`" cmd /k $claudeCmd"
 
-for ($i = 1; $i -le $workers; $i++) {
-  $wtCmd += " `; new-tab --title `"Worker-$i`" --startingDirectory `"$workerDir`" cmd /k $claudeCmd"
+if ($split) {
+  # 分割表示モード: 1つのタブ内でペイン分割
+  # Dispatcher を最初のペインとして起動
+  $wtCmd = "new-tab --title `"claude-peers`" --startingDirectory `"$dispatcherDir`" cmd /k $claudeCmd"
+
+  # Worker を交互に水平・垂直分割で追加（グリッド配置）
+  for ($i = 1; $i -le $workers; $i++) {
+    if ($i -eq 1) {
+      # 最初のWorkerは右に垂直分割
+      $wtCmd += " `; split-pane --horizontal --title `"Worker-$i`" --startingDirectory `"$workerDir`" cmd /k $claudeCmd"
+    } elseif ($i % 2 -eq 0) {
+      # 偶数番目は下に水平分割
+      $wtCmd += " `; split-pane --vertical --title `"Worker-$i`" --startingDirectory `"$workerDir`" cmd /k $claudeCmd"
+    } else {
+      # 奇数番目は右に垂直分割
+      $wtCmd += " `; split-pane --horizontal --title `"Worker-$i`" --startingDirectory `"$workerDir`" cmd /k $claudeCmd"
+    }
+  }
+} else {
+  # タブ表示モード（デフォルト）: 各セッションを別タブで起動
+  $wtCmd = "new-tab --title `"Dispatcher`" --startingDirectory `"$dispatcherDir`" cmd /k $claudeCmd"
+
+  for ($i = 1; $i -le $workers; $i++) {
+    $wtCmd += " `; new-tab --title `"Worker-$i`" --startingDirectory `"$workerDir`" cmd /k $claudeCmd"
+  }
 }
 
 try {
@@ -130,7 +154,11 @@ Write-Host "  Dispatcher x 1 + Worker x $workers" -ForegroundColor White
 Write-Host "  プロジェクト: $project" -ForegroundColor White
 Write-Host "  モード: $mode" -ForegroundColor White
 Write-Host ""
-Write-Host "  Dispatcherタブだけ見ておけばOKです。" -ForegroundColor Cyan
+if ($split) {
+  Write-Host "  分割表示: 全セッションが1画面に表示されています。" -ForegroundColor Cyan
+} else {
+  Write-Host "  Dispatcherタブだけ見ておけばOKです。" -ForegroundColor Cyan
+}
 Write-Host "  終了: .\stop-peers.ps1" -ForegroundColor Yellow
 Write-Host ""
 

@@ -39,18 +39,16 @@ Dispatcher・Worker のシステムプロンプトはプロジェクトの CLAUD
 
 ### 1.3 起動・画面管理
 
-推奨環境は Windows です。Windows Terminal の複数タブで各セッションを管理します。tmux による分割表示はオプションです。
+推奨環境は Windows です。Windows Terminal で各セッションを管理します。
 
-| 環境 | 画面管理方法 | 推奨 |
+| 表示モード | 起動方法 | 用途 |
 |---|---|---|
-| Windows | Windows Terminal（複数タブ） + start-peers.ps1 | ✅ 推奨 |
-| Windows | tmux（WSL2内での分割表示） | オプション |
-| Mac | tmux（分割表示） | オプション |
+| タブ表示（デフォルト） | `start-peers.ps1` | Dispatcher タブだけ見ればOK |
+| 分割表示 | `start-peers.ps1 -split` | 全セッションを1画面で同時監視 |
 
 **推奨運用**
-- Dispatcher タブだけ見ておけば全体の進捗は把握できる
-- 他の Worker タブは裏で動いており、切り替えれば確認可能
-- 全セッションを同時に見たい場合のみ tmux を使用
+- 通常はタブ表示で Dispatcher タブだけ見ておけば全体の進捗は把握できる
+- 全セッションを同時に見たい場合は `-split` オプションで分割表示
 
 ---
 

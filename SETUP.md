@@ -98,10 +98,11 @@ C:\path\to\claude`s team\start-peers.ps1
 ### オプション指定
 
 ```powershell
-.\start-peers.ps1                          # デフォルト: Worker 3体, HYBRID
+.\start-peers.ps1                          # デフォルト: Worker 3体, HYBRID, タブ表示
 .\start-peers.ps1 -workers 4              # Worker数を変更
 .\start-peers.ps1 -mode FULL_AUTO         # 完全自律モードで起動
 .\start-peers.ps1 -project my-app         # プロジェクト名を明示
+.\start-peers.ps1 -split                  # 全セッションを1画面に分割表示
 ```
 
 ### 起動時に自動で行われること

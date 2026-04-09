@@ -66,10 +66,11 @@ claude`s team/
 ## 起動オプション
 
 ```powershell
-.\start-peers.ps1                         # デフォルト: Worker 3体, HYBRID
+.\start-peers.ps1                         # デフォルト: Worker 3体, HYBRID, タブ表示
 .\start-peers.ps1 -workers 5              # Worker 5体
 .\start-peers.ps1 -mode FULL_AUTO         # 完全自律モード
 .\start-peers.ps1 -project my-app         # namespace を明示
+.\start-peers.ps1 -split                  # 全セッションを1画面に分割表示
 ```
 
 ## 自律性モード
