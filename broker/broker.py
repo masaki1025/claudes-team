@@ -18,6 +18,8 @@ import database as db
 from models import (
     SessionRegister,
     SummaryUpdate,
+    RoleUpdate,
+    ModeUpdate,
     MessageSend,
     BroadcastSend,
     LockRequest,
@@ -104,8 +106,6 @@ async def health():
 @app.post("/shutdown")
 async def shutdown():
     conn = await get_db()
-    sessions = await db.get_sessions(conn, "%")
-    # Use a broader query to get all sessions
     cursor = await conn.execute("SELECT session_id, channel_url FROM peers")
     rows = await cursor.fetchall()
     notified = 0
@@ -134,13 +134,20 @@ async def shutdown():
 @app.post("/sessions")
 async def register_session(req: SessionRegister):
     conn = await get_db()
+
+    # Validate channel_url format
+    if not req.channel_url.startswith("http://127.0.0.1:") and not req.channel_url.startswith("http://localhost:"):
+        error_response("INVALID_REQUEST", "channel_url は http://127.0.0.1 または http://localhost で始まる必要があります")
+
     session_id = await db.generate_session_id(conn, req.role, req.namespace)
 
-    # Check if dispatcher already exists
+    # Check if dispatcher already exists in the same namespace
     if req.role == "dispatcher":
         existing = await db.get_session(conn, "dispatcher-1")
-        if existing and existing["namespace"] == req.namespace:
-            # Re-register dispatcher
+        if existing:
+            if existing["namespace"] != req.namespace:
+                error_response("NAMESPACE_MISMATCH", f"別のnamespace ({existing['namespace']}) の Dispatcher が既に存在します")
+            # Same namespace: re-register
             await db.delete_session(conn, "dispatcher-1")
 
     await db.register_session(
@@ -186,6 +193,7 @@ async def list_sessions(namespace: str = Query(...)):
             {
                 "session_id": s["session_id"],
                 "role": s["role"],
+                "mode": s["mode"],
                 "work_dir": s["work_dir"],
                 "current_task": s["current_task"],
                 "last_heartbeat": s["last_heartbeat"],
@@ -199,6 +207,26 @@ async def list_sessions(namespace: str = Query(...)):
 async def update_summary(session_id: str, req: SummaryUpdate):
     conn = await get_db()
     found = await db.update_summary(conn, session_id, req.summary)
+    if not found:
+        error_response("SESSION_NOT_FOUND", "セッションが見つかりません", 404)
+    return {"status": "ok"}
+
+
+@app.put("/sessions/{session_id}/role")
+async def update_role(session_id: str, req: RoleUpdate):
+    conn = await get_db()
+    found = await db.update_role(conn, session_id, req.role)
+    if not found:
+        error_response("SESSION_NOT_FOUND", "セッションが見つかりません", 404)
+    return {"status": "ok"}
+
+
+@app.put("/sessions/{session_id}/mode")
+async def update_mode(session_id: str, req: ModeUpdate):
+    conn = await get_db()
+    if req.mode not in ("MANUAL", "HYBRID", "FULL_AUTO"):
+        error_response("INVALID_REQUEST", "モードは MANUAL / HYBRID / FULL_AUTO のいずれかです")
+    found = await db.update_mode(conn, session_id, req.mode)
     if not found:
         error_response("SESSION_NOT_FOUND", "セッションが見つかりません", 404)
     return {"status": "ok"}
@@ -238,10 +266,13 @@ async def send_message(req: MessageSend):
         "content": req.content,
         "timestamp": db.now_iso(),
     }
-    await deliver_to_channel(recipient["channel_url"], payload)
+    delivered = await deliver_to_channel(recipient["channel_url"], payload)
 
-    logger.info(f"Message {msg_id}: {req.from_id} -> {req.to_id}")
-    return {"status": "ok", "message_id": f"msg-{msg_id:03d}"}
+    logger.info(f"Message {msg_id}: {req.from_id} -> {req.to_id} (delivered={delivered})")
+    result = {"status": "ok", "message_id": f"msg-{msg_id:03d}"}
+    if not delivered:
+        result["warning"] = f"メッセージは保存されましたが、{req.to_id} への配信に失敗しました"
+    return result
 
 
 @app.post("/messages/broadcast")

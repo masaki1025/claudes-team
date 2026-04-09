@@ -13,7 +13,12 @@ export class BrokerClient {
   }
 
   getSessionId(): string {
-    if (!this.sessionId) throw new Error("Not registered yet");
+    if (!this.sessionId) throw new Error("ブローカー未登録です。先に register() を呼んでください。");
+    return this.sessionId;
+  }
+
+  private requireSession(): string {
+    if (!this.sessionId) throw new Error("ブローカー未登録です。先に register() を呼んでください。");
     return this.sessionId;
   }
 
@@ -83,13 +88,30 @@ export class BrokerClient {
     });
   }
 
+  async updateRole(role: string): Promise<void> {
+    const sid = this.requireSession();
+    await this.request(`/sessions/${sid}/role`, {
+      method: "PUT",
+      body: JSON.stringify({ role }),
+    });
+  }
+
+  async updateMode(mode: string): Promise<void> {
+    const sid = this.requireSession();
+    await this.request(`/sessions/${sid}/mode`, {
+      method: "PUT",
+      body: JSON.stringify({ mode }),
+    });
+  }
+
   // --- Messaging ---
 
   async sendMessage(toId: string, content: string): Promise<string> {
+    const sid = this.requireSession();
     const data = await this.request("/messages", {
       method: "POST",
       body: JSON.stringify({
-        from_id: this.sessionId,
+        from_id: sid,
         to_id: toId,
         content,
       }),
@@ -98,10 +120,11 @@ export class BrokerClient {
   }
 
   async broadcast(content: string): Promise<string[]> {
+    const sid = this.requireSession();
     const data = await this.request("/messages/broadcast", {
       method: "POST",
       body: JSON.stringify({
-        from_id: this.sessionId,
+        from_id: sid,
         content,
       }),
     });
@@ -117,17 +140,19 @@ export class BrokerClient {
   // --- File locks ---
 
   async lockFile(filePath: string): Promise<{ status: string; locked_by?: string; expires_at?: string }> {
+    const sid = this.requireSession();
     return this.request("/locks", {
       method: "POST",
       body: JSON.stringify({
-        session_id: this.sessionId,
+        session_id: sid,
         file_path: filePath,
       }),
     });
   }
 
   async unlockFile(filePath: string): Promise<void> {
-    await this.request(`/locks/${this.sessionId}/${encodeURIComponent(filePath)}`, {
+    const sid = this.requireSession();
+    await this.request(`/locks/${sid}/${encodeURIComponent(filePath)}`, {
       method: "DELETE",
     });
   }

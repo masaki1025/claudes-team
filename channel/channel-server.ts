@@ -56,9 +56,6 @@ async function main() {
   const instructions = loadInstructions(role);
   const broker = new BrokerClient(brokerUrl, namespace);
 
-  // Track current mode (for dispatcher)
-  let currentMode = "HYBRID";
-
   // Create MCP server
   const server = new Server(
     { name: "claude-peers", version: "1.0.0" },
@@ -155,14 +152,13 @@ async function main() {
 
         case "set_role": {
           const { role: newRole } = args as { role: string };
-          // Role is updated via summary or metadata; for now just acknowledge
-          await broker.updateSummary(`role=${newRole}`);
+          await broker.updateRole(newRole);
           return text(`ロールを ${newRole} に設定しました`);
         }
 
         case "set_mode": {
           const { mode } = args as { mode: string };
-          currentMode = mode;
+          await broker.updateMode(mode);
           return text(`自律性モードを ${mode} に変更しました`);
         }
 
@@ -187,35 +183,20 @@ async function main() {
           const payload: IncomingPayload = JSON.parse(body);
 
           if ("type" in payload && payload.type === "shutdown") {
-            // Shutdown notification from broker
-            await server.notification({
-              method: "notifications/claude/channel" as any,
-              params: {
-                channel: "claude-peers",
-                content: `ブローカーが停止しました: ${payload.message}`,
-              },
-            } as any);
+            await pushToChannel(server, `ブローカーが停止しました: ${payload.message}`);
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ status: "ok" }));
-            // Graceful shutdown
             setTimeout(() => process.exit(0), 1000);
             return;
           }
 
           // Normal message push
           const msg = payload as PushPayload;
-          await server.notification({
-            method: "notifications/claude/channel" as any,
-            params: {
-              channel: "claude-peers",
-              content: msg.content,
-              meta: {
-                from_id: msg.from_id,
-                from_role: msg.from_role,
-                timestamp: msg.timestamp,
-              },
-            },
-          } as any);
+          await pushToChannel(server, msg.content, {
+            from_id: msg.from_id,
+            from_role: msg.from_role,
+            timestamp: msg.timestamp,
+          });
 
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ status: "ok" }));
@@ -282,6 +263,18 @@ function text(content: string, isError = false) {
     content: [{ type: "text" as const, text: content }],
     isError,
   };
+}
+
+/** Send a claude/channel notification. Uses `as any` once to bridge the custom protocol type. */
+async function pushToChannel(
+  server: Server,
+  content: string,
+  meta?: Record<string, string>,
+): Promise<void> {
+  await (server as any).notification({
+    method: "notifications/claude/channel",
+    params: { channel: "claude-peers", content, ...(meta ? { meta } : {}) },
+  });
 }
 
 function log(msg: string) {

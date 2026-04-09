@@ -20,6 +20,7 @@ async def init_db(db_path: str = DB_PATH) -> aiosqlite.Connection:
             work_dir       TEXT,
             git_repo       TEXT,
             current_task   TEXT,
+            mode           TEXT DEFAULT 'HYBRID',
             channel_url    TEXT NOT NULL,
             last_heartbeat DATETIME DEFAULT CURRENT_TIMESTAMP,
             created_at     DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -51,6 +52,7 @@ async def init_db(db_path: str = DB_PATH) -> aiosqlite.Connection:
         CREATE INDEX IF NOT EXISTS idx_locks_namespace ON file_locks(namespace);
         CREATE INDEX IF NOT EXISTS idx_locks_session ON file_locks(session_id);
 
+        -- TODO: Phase 6 で使用予定（タスクキュー機能）
         CREATE TABLE IF NOT EXISTS tasks (
             task_id        TEXT PRIMARY KEY,
             namespace      TEXT NOT NULL,
@@ -149,6 +151,26 @@ async def update_heartbeat(db: aiosqlite.Connection, session_id: str) -> bool:
     return cursor.rowcount > 0
 
 
+async def update_role(db: aiosqlite.Connection, session_id: str, role: str) -> bool:
+    """Update role for a session. Returns True if found."""
+    cursor = await db.execute(
+        "UPDATE peers SET role = ? WHERE session_id = ?",
+        (role, session_id),
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def update_mode(db: aiosqlite.Connection, session_id: str, mode: str) -> bool:
+    """Update autonomy mode for a session. Returns True if found."""
+    cursor = await db.execute(
+        "UPDATE peers SET mode = ? WHERE session_id = ?",
+        (mode, session_id),
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
 async def update_summary(db: aiosqlite.Connection, session_id: str, summary: str) -> bool:
     """Update current_task for a session. Returns True if found."""
     cursor = await db.execute(
@@ -233,39 +255,49 @@ async def acquire_lock(
     namespace: str,
     duration_minutes: int = 30,
 ) -> dict:
-    """Try to acquire a file lock. Returns status dict."""
-    # Check for existing lock
-    cursor = await db.execute(
-        "SELECT * FROM file_locks WHERE file_path = ?", (file_path,)
-    )
-    existing = await cursor.fetchone()
-
-    if existing:
-        existing = dict(existing)
-        # Check if expired
-        expires = existing["expires_at"]
-        if expires and datetime.fromisoformat(expires.replace("Z", "+00:00")) < datetime.now(timezone.utc):
-            # Expired - remove and allow new lock
-            await db.execute("DELETE FROM file_locks WHERE file_path = ?", (file_path,))
-        elif existing["session_id"] != session_id:
-            return {
-                "status": "conflict",
-                "locked_by": existing["session_id"],
-                "acquired_at": existing["acquired_at"],
-            }
-
-    now = datetime.now(timezone.utc)
+    """Try to acquire a file lock. Uses BEGIN IMMEDIATE for atomicity."""
     from datetime import timedelta
-    expires_at = (now + timedelta(minutes=duration_minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    now_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    await db.execute(
-        """INSERT OR REPLACE INTO file_locks (file_path, session_id, namespace, acquired_at, expires_at)
-           VALUES (?, ?, ?, ?, ?)""",
-        (file_path, session_id, namespace, now_str, expires_at),
-    )
-    await db.commit()
-    return {"status": "ok", "expires_at": expires_at}
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        cursor = await db.execute(
+            "SELECT * FROM file_locks WHERE file_path = ?", (file_path,)
+        )
+        existing = await cursor.fetchone()
+
+        if existing:
+            existing = dict(existing)
+            expires = existing["expires_at"]
+            is_expired = (
+                expires
+                and datetime.fromisoformat(expires.replace("Z", "+00:00"))
+                < datetime.now(timezone.utc)
+            )
+
+            if is_expired:
+                await db.execute("DELETE FROM file_locks WHERE file_path = ?", (file_path,))
+            elif existing["session_id"] != session_id:
+                await db.execute("ROLLBACK")
+                return {
+                    "status": "conflict",
+                    "locked_by": existing["session_id"],
+                    "acquired_at": existing["acquired_at"],
+                }
+
+        now = datetime.now(timezone.utc)
+        expires_at = (now + timedelta(minutes=duration_minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        now_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        await db.execute(
+            """INSERT OR REPLACE INTO file_locks (file_path, session_id, namespace, acquired_at, expires_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (file_path, session_id, namespace, now_str, expires_at),
+        )
+        await db.commit()
+        return {"status": "ok", "expires_at": expires_at}
+    except Exception:
+        await db.execute("ROLLBACK")
+        raise
 
 
 async def release_lock(db: aiosqlite.Connection, session_id: str, file_path: str) -> bool:
