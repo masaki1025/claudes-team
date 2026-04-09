@@ -3,6 +3,7 @@
 export interface SessionInfo {
   session_id: string;
   role: string;
+  mode: string;
   work_dir: string;
   current_task: string | null;
   last_heartbeat: string;

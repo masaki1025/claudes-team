@@ -103,7 +103,7 @@ async def register_session(
     git_repo: Optional[str],
     channel_url: str,
 ) -> None:
-    """Register a new session."""
+    """Register a new session. Caller is responsible for commit/transaction."""
     now = now_iso()
     await db.execute(
         """INSERT OR REPLACE INTO peers
@@ -111,7 +111,6 @@ async def register_session(
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (session_id, namespace, role, work_dir, git_repo, channel_url, now, now),
     )
-    await db.commit()
 
 
 async def delete_session(db: aiosqlite.Connection, session_id: str) -> bool:

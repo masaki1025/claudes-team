@@ -5,7 +5,6 @@ import asyncio
 import logging
 import os
 import signal
-import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -139,26 +138,33 @@ async def register_session(req: SessionRegister):
     if not req.channel_url.startswith("http://127.0.0.1:") and not req.channel_url.startswith("http://localhost:"):
         error_response("INVALID_REQUEST", "channel_url は http://127.0.0.1 または http://localhost で始まる必要があります")
 
-    session_id = await db.generate_session_id(conn, req.role, req.namespace)
+    # Atomic dispatcher check + registration
+    await conn.execute("BEGIN IMMEDIATE")
+    try:
+        session_id = await db.generate_session_id(conn, req.role, req.namespace)
 
-    # Check if dispatcher already exists in the same namespace
-    if req.role == "dispatcher":
-        existing = await db.get_session(conn, "dispatcher-1")
-        if existing:
-            if existing["namespace"] != req.namespace:
-                error_response("NAMESPACE_MISMATCH", f"別のnamespace ({existing['namespace']}) の Dispatcher が既に存在します")
-            # Same namespace: re-register
-            await db.delete_session(conn, "dispatcher-1")
+        if req.role == "dispatcher":
+            existing = await db.get_session(conn, "dispatcher-1")
+            if existing:
+                if existing["namespace"] != req.namespace:
+                    await conn.execute("ROLLBACK")
+                    error_response("NAMESPACE_MISMATCH", f"別のnamespace ({existing['namespace']}) の Dispatcher が既に存在します")
+                await conn.execute("DELETE FROM peers WHERE session_id = ?", ("dispatcher-1",))
 
-    await db.register_session(
-        conn,
-        session_id=session_id,
-        namespace=req.namespace,
-        role=req.role,
-        work_dir=req.work_dir,
-        git_repo=req.git_repo,
-        channel_url=req.channel_url,
-    )
+        await db.register_session(
+            conn,
+            session_id=session_id,
+            namespace=req.namespace,
+            role=req.role,
+            work_dir=req.work_dir,
+            git_repo=req.git_repo,
+            channel_url=req.channel_url,
+        )
+        await conn.commit()
+    except Exception:
+        await conn.execute("ROLLBACK")
+        raise
+
     logger.info(f"Session registered: {session_id} (role={req.role}, ns={req.namespace})")
     return {"status": "ok", "session_id": session_id}
 

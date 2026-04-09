@@ -22,18 +22,20 @@ import type { IncomingPayload, PushPayload } from "./types.js";
 
 // --- Parse CLI arguments ---
 
-function parseArgs(): { role: string; namespace: string; brokerUrl: string } {
+function parseArgs(): { role: string; namespace: string; brokerUrl: string; mode: string } {
   const args = process.argv.slice(2);
   let role = "worker";
   let namespace = "default";
   let brokerUrl = "http://localhost:7799";
+  let mode = "HYBRID";
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--role" && args[i + 1]) role = args[++i];
     else if (args[i] === "--namespace" && args[i + 1]) namespace = args[++i];
     else if (args[i] === "--broker" && args[i + 1]) brokerUrl = args[++i];
+    else if (args[i] === "--mode" && args[i + 1]) mode = args[++i];
   }
-  return { role, namespace, brokerUrl };
+  return { role, namespace, brokerUrl, mode };
 }
 
 // --- Load system prompt ---
@@ -52,7 +54,7 @@ function loadInstructions(role: string): string {
 // --- Main ---
 
 async function main() {
-  const { role, namespace, brokerUrl } = parseArgs();
+  const { role, namespace, brokerUrl, mode } = parseArgs();
   const instructions = loadInstructions(role);
   const broker = new BrokerClient(brokerUrl, namespace);
 
@@ -98,7 +100,7 @@ async function main() {
           const peers = await broker.listPeers();
           const lines = peers.map(
             (p) =>
-              `- ${p.session_id} (${p.role}) ${p.current_task || "待機中"}`
+              `- ${p.session_id} (${p.role}, ${p.mode}) ${p.current_task || "待機中"}`
           );
           return text(
             lines.length > 0
@@ -227,6 +229,12 @@ async function main() {
   const workDir = process.cwd();
   const sessionId = await broker.register(role, workDir, channelUrl);
   log(`Registered as ${sessionId} (role=${role}, ns=${namespace})`);
+
+  // Apply initial autonomy mode
+  if (mode !== "HYBRID") {
+    await broker.updateMode(mode);
+    log(`Mode set to ${mode}`);
+  }
 
   // Heartbeat loop
   const heartbeatInterval = setInterval(async () => {

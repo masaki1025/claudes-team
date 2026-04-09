@@ -59,7 +59,7 @@ $dispatcherConfig = @{
   mcpServers = @{
     "claude-peers" = @{
       command = $tsxPath
-      args = @($channelScriptEscaped, "--role", "dispatcher", "--namespace", $project, "--broker", $brokerUrl)
+      args = @($channelScriptEscaped, "--role", "dispatcher", "--namespace", $project, "--broker", $brokerUrl, "--mode", $mode)
     }
   }
 } | ConvertTo-Json -Depth 5
@@ -68,7 +68,7 @@ $workerConfig = @{
   mcpServers = @{
     "claude-peers" = @{
       command = $tsxPath
-      args = @($channelScriptEscaped, "--role", "worker", "--namespace", $project, "--broker", $brokerUrl)
+      args = @($channelScriptEscaped, "--role", "worker", "--namespace", $project, "--broker", $brokerUrl, "--mode", $mode)
     }
   }
 } | ConvertTo-Json -Depth 5
@@ -124,7 +124,18 @@ for ($i = 1; $i -le $workers; $i++) {
 
 Write-Host ""
 Write-Host "Windows Terminal でセッションを起動中..." -ForegroundColor Yellow
-Start-Process wt -ArgumentList ($wtArgs -join " ")
+
+if (-not (Get-Command wt -ErrorAction SilentlyContinue)) {
+  Write-Host "エラー: Windows Terminal (wt) が見つかりません。インストールしてください。" -ForegroundColor Red
+  exit 1
+}
+
+try {
+  Start-Process wt -ArgumentList ($wtArgs -join " ") -ErrorAction Stop
+} catch {
+  Write-Host "エラー: Windows Terminal の起動に失敗しました: $_" -ForegroundColor Red
+  exit 1
+}
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Green
