@@ -1,0 +1,13 @@
+# Python
+broker/.venv/
+broker/__pycache__/
+*.pyc
+*.db
+
+# Node
+channel/node_modules/
+channel/dist/
+
+# Runtime
+.broker.pid
+.claude-peers/
