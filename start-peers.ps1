@@ -99,29 +99,6 @@ if ($needsAppend) {
 $dispatcherDir = Join-Path $claudePeersDir "dispatcher"
 $workerDir = Join-Path $claudePeersDir "worker"
 
-# Build Windows Terminal arguments
-$wtArgs = @()
-$wtArgs += "new-tab"
-$wtArgs += "--title"
-$wtArgs += "Dispatcher"
-$wtArgs += "--startingDirectory"
-$wtArgs += "`"$dispatcherDir`""
-$wtArgs += "cmd"
-$wtArgs += "/k"
-$wtArgs += "claude --dangerously-load-development-channels server:claude-peers"
-
-for ($i = 1; $i -le $workers; $i++) {
-  $wtArgs += ";"
-  $wtArgs += "new-tab"
-  $wtArgs += "--title"
-  $wtArgs += "Worker-$i"
-  $wtArgs += "--startingDirectory"
-  $wtArgs += "`"$workerDir`""
-  $wtArgs += "cmd"
-  $wtArgs += "/k"
-  $wtArgs += "claude --dangerously-load-development-channels server:claude-peers"
-}
-
 Write-Host ""
 Write-Host "Windows Terminal でセッションを起動中..." -ForegroundColor Yellow
 
@@ -130,8 +107,16 @@ if (-not (Get-Command wt -ErrorAction SilentlyContinue)) {
   exit 1
 }
 
+# Build Windows Terminal command line as a single string (wt uses `;` delimiters)
+$claudeCmd = "claude --dangerously-load-development-channels server:claude-peers"
+$wtCmd = "new-tab --title `"Dispatcher`" --startingDirectory `"$dispatcherDir`" cmd /k $claudeCmd"
+
+for ($i = 1; $i -le $workers; $i++) {
+  $wtCmd += " `; new-tab --title `"Worker-$i`" --startingDirectory `"$workerDir`" cmd /k $claudeCmd"
+}
+
 try {
-  Start-Process wt -ArgumentList ($wtArgs -join " ") -ErrorAction Stop
+  Start-Process wt -ArgumentList $wtCmd -ErrorAction Stop
 } catch {
   Write-Host "エラー: Windows Terminal の起動に失敗しました: $_" -ForegroundColor Red
   exit 1

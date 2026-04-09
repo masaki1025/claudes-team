@@ -113,13 +113,6 @@ async def register_session(
     )
 
 
-async def delete_session(db: aiosqlite.Connection, session_id: str) -> bool:
-    """Delete a session. Returns True if found."""
-    cursor = await db.execute("DELETE FROM peers WHERE session_id = ?", (session_id,))
-    await db.commit()
-    return cursor.rowcount > 0
-
-
 async def get_session(db: aiosqlite.Connection, session_id: str) -> Optional[dict]:
     """Get a single session by ID."""
     cursor = await db.execute("SELECT * FROM peers WHERE session_id = ?", (session_id,))

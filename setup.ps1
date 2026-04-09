@@ -5,7 +5,7 @@ Write-Host ""
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-# 前提チェック
+# 前提チェック（存在 + バージョン）
 $missing = @()
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) { $missing += "uv" }
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) { $missing += "node" }
@@ -14,6 +14,15 @@ if ($missing.Count -gt 0) {
   Write-Host "エラー: 以下のツールがインストールされていません: $($missing -join ', ')" -ForegroundColor Red
   exit 1
 }
+
+# バージョン確認
+$nodeVersion = (node --version) -replace '^v', ''
+$nodeMajor = [int]($nodeVersion -split '\.')[0]
+if ($nodeMajor -lt 18) {
+  Write-Host "エラー: Node.js v18以上が必要です（現在: v$nodeVersion）" -ForegroundColor Red
+  exit 1
+}
+Write-Host "  ツール確認OK (node v$nodeVersion, uv $(uv --version))" -ForegroundColor Green
 
 # Step 1: ブローカー（Python）
 Write-Host "[1/3] ブローカーの依存インストール..." -ForegroundColor Yellow

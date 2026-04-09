@@ -28,9 +28,15 @@ export class BrokerClient {
 
   private async request(path: string, options: RequestInit = {}): Promise<any> {
     const url = `${this.brokerUrl}${path}`;
+    const { headers: extraHeaders, ...restOptions } = options;
     const resp = await fetch(url, {
-      headers: { "Content-Type": "application/json", ...options.headers as any },
-      ...options,
+      ...restOptions,
+      headers: {
+        "Content-Type": "application/json",
+        ...(extraHeaders instanceof Headers
+          ? Object.fromEntries(extraHeaders.entries())
+          : Array.isArray(extraHeaders) ? Object.fromEntries(extraHeaders) : extraHeaders ?? {}),
+      },
     });
     if (!resp.ok) {
       const body = await resp.text();
