@@ -68,12 +68,12 @@ Write-Host "[3/3] システムプロンプトを配置..." -ForegroundColor Yell
 $claudePeersHome = Join-Path $HOME ".claude-peers"
 New-Item -ItemType Directory -Force -Path (Join-Path $claudePeersHome "logs" "sessions") | Out-Null
 
-$specsDir = Join-Path $scriptDir "specs"
-$dispatcherSrc = Join-Path $specsDir "dispatcher.md"
-$workerSrc = Join-Path $specsDir "worker.md"
+$promptsDir = Join-Path $scriptDir "prompts"
+$dispatcherSrc = Join-Path $promptsDir "dispatcher.md"
+$workerSrc = Join-Path $promptsDir "worker.md"
 
 if (-not (Test-Path $dispatcherSrc) -or -not (Test-Path $workerSrc)) {
-  Write-Host "  エラー: specs/dispatcher.md または specs/worker.md が見つかりません" -ForegroundColor Red
+  Write-Host "  エラー: prompts/dispatcher.md または prompts/worker.md が見つかりません" -ForegroundColor Red
   exit 1
 }
 
