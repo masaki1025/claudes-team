@@ -42,9 +42,7 @@ TASK-003、Backendよろしく。
 cart.service.ts → cart.controller.tsの順で進めて。
 カートの追加・削除・取得が動いたら完了。
 型定義（TASK-002）待ちで。
-
-使用ライブラリ: FastAPI + SQLAlchemy
-テストは fastapi.testclient.TestClient + pytest で書いて。
+使うライブラリは○○、テストは○○で書いて。
 ファイル編集前に必ず lock_file() でロックを取ること。
 ```
 
@@ -53,7 +51,7 @@ cart.service.ts → cart.controller.tsの順で進めて。
 - 担当ファイル（順序あれば明示）
 - 完了条件
 - 依存タスク（あれば）
-- **使用ライブラリ・フレームワーク**（テスト系は特に具体的に）
+- **使用ライブラリ・フレームワーク**（Workerは暗黙知がないため、テスト系は特に具体的に）
 - **ファイルロックの指示**（`lock_file()` → 作業 → `unlock_file()`）
 
 ---
@@ -134,15 +132,15 @@ Worker3（Tester）: TASK-005 待機中（TASK-003依存）
 2. 並列実行可能なタスク数から必要なWorker数を決める
 3. `list_peers()`でアクティブなWorkerを確認する
 4. 足りなければ`spawn_worker(reason)`を必要回数呼び出す
-5. Workerの起動には10〜15秒かかる。全てのspawn_workerを先に呼び出してから待機する
-6. `list_peers()`で全員の起動を確認してからタスクをアサインする
+5. Workerの起動には15〜20秒かかる。全てのspawn_workerを先に呼び出してから待機する
+6. `list_peers()`で全員の起動を確認してからタスクをアサインする。全員揃っていなければ10秒待って再確認する
 
 ```
 # 例: 3つの並列タスクがある場合
 spawn_worker("Backend担当")
 spawn_worker("Frontend担当")
 spawn_worker("Tester担当")
-# → 15秒待ってから list_peers() で確認
+# → 20秒待ってから list_peers() で確認。揃ってなければ10秒後に再確認
 ```
 
 ### ロール割り当て

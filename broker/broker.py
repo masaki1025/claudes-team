@@ -53,6 +53,11 @@ _spawn_config = {
     "permissions": ["Bash", "Edit", "Write", "Read", "Glob", "Grep", "WebFetch", "mcp__claude-peers"],
 }
 
+# Spawn batch queue — collect spawn requests and launch as a single wt command
+_spawn_queue: list[dict] = []
+_spawn_timer: asyncio.Task | None = None
+SPAWN_BATCH_DELAY = 3.0  # seconds to wait before flushing
+
 
 async def get_db():
     return _db
@@ -437,8 +442,63 @@ async def list_locks(namespace: str = Query(...)):
 
 
 # ===================
-# Worker spawning
+# Worker spawning (batch)
 # ===================
+
+
+def _build_wt_command(workers: list[dict], split: bool) -> str:
+    """Build a single wt command for batch worker launch.
+
+    For split mode, creates a 2x2 grid layout (workers 1-3):
+        [D | W1] / [W2 | W3]
+    Workers 4+ fall back to new-tab.
+    """
+    claude_cmd = "claude --dangerously-load-development-channels server:claude-peers"
+    parts: list[str] = []
+
+    for w in workers:
+        pane_cmd = f'--title "{w["name"]}" --startingDirectory "{w["dir"]}" cmd /k {claude_cmd}'
+
+        if not split or w["num"] > 3:
+            parts.append(f"new-tab {pane_cmd}")
+        elif w["num"] == 1:
+            # D | W1 (vertical split, 50/50)
+            parts.append(f"split-pane --vertical --size 0.5 {pane_cmd}")
+        elif w["num"] == 2:
+            # Focus D (left), split horizontally → W2 below D
+            parts.append("move-focus --direction left")
+            parts.append(f"split-pane --horizontal --size 0.5 {pane_cmd}")
+        elif w["num"] == 3:
+            # Focus W1 (right), split horizontally → W3 below W1 → 2x2
+            parts.append("move-focus --direction right")
+            parts.append(f"split-pane --horizontal --size 0.5 {pane_cmd}")
+
+    return "-w 0 " + " ; ".join(parts)
+
+
+async def _flush_spawn_queue():
+    """Execute all queued spawns as a single wt command."""
+    global _spawn_queue
+    if not _spawn_queue:
+        return
+
+    workers = _spawn_queue[:]
+    _spawn_queue = []
+
+    wt_args = _build_wt_command(workers, _spawn_config["split"])
+    try:
+        subprocess.Popen(f"wt {wt_args}", shell=True)
+        names = [w["name"] for w in workers]
+        logger.info(f"Batch spawned {len(workers)} workers: {names}")
+    except Exception as e:
+        logger.error(f"Batch spawn failed: {e}")
+
+
+async def _spawn_batch_timer():
+    """Wait for batch delay, then flush."""
+    await asyncio.sleep(SPAWN_BATCH_DELAY)
+    await _flush_spawn_queue()
+
 
 @app.post("/spawn")
 async def spawn_worker(req: SpawnRequest):
@@ -495,33 +555,20 @@ async def spawn_worker(req: SpawnRequest):
     }
     (settings_dir / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
 
-    # Launch Windows Terminal tab or split-pane
-    claude_cmd = "claude --dangerously-load-development-channels server:claude-peers"
-    pane_cmd = f"--title \"{worker_name}\" --startingDirectory \"{worker_dir}\" cmd /k {claude_cmd}"
-    if _spawn_config["split"]:
-        # 2x2 grid layout (single wt command with chained actions):
-        #   1 worker:  [D | W1]
-        #   2 workers: [D | W1] / [W2 |   ]
-        #   3 workers: [D | W1] / [W2 | W3]
-        if next_num == 1:
-            # D | W1 (vertical split, 50/50)
-            wt_args = f"-w 0 split-pane --vertical --size 0.5 {pane_cmd}"
-        elif next_num == 2:
-            # Navigate to D (first pane), split horizontally → W2 below D
-            wt_args = f"-w 0 move-focus --direction first ; split-pane --horizontal --size 0.5 {pane_cmd}"
-        elif next_num == 3:
-            # Navigate to W1 (first → right), split horizontally → W3 below W1 → 2x2
-            wt_args = f"-w 0 move-focus --direction first ; move-focus --direction right ; split-pane --horizontal --size 0.5 {pane_cmd}"
-        else:
-            wt_args = f"-w 0 split-pane --horizontal --size 0.5 {pane_cmd}"
-    else:
-        wt_args = f"-w 0 new-tab {pane_cmd}"
-    try:
-        subprocess.Popen(f"wt {wt_args}", shell=True)
-    except Exception as e:
-        error_response("SPAWN_FAILED", f"Worker起動に失敗しました: {e}", 500)
+    # Queue for batch launch (single wt command for reliable pane layout)
+    global _spawn_timer
+    _spawn_queue.append({
+        "name": worker_name,
+        "dir": str(worker_dir),
+        "num": next_num,
+    })
 
-    logger.info(f"Spawned {worker_name} for namespace {req.namespace}")
+    # Reset batch timer — flush after SPAWN_BATCH_DELAY seconds of no new requests
+    if _spawn_timer and not _spawn_timer.done():
+        _spawn_timer.cancel()
+    _spawn_timer = asyncio.create_task(_spawn_batch_timer())
+
+    logger.info(f"Queued {worker_name} for batch spawn (namespace={req.namespace})")
     return {"status": "ok", "worker_id": worker_name}
 
 
