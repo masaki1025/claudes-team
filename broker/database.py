@@ -29,13 +29,14 @@ async def init_db(db_path: str = DB_PATH) -> aiosqlite.Connection:
         CREATE INDEX IF NOT EXISTS idx_peers_namespace ON peers(namespace);
 
         CREATE TABLE IF NOT EXISTS messages (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            from_id    TEXT NOT NULL,
-            to_id      TEXT,
-            namespace  TEXT NOT NULL,
-            content    TEXT NOT NULL,
-            read_flag  INTEGER DEFAULT 0,
-            timestamp  DATETIME DEFAULT CURRENT_TIMESTAMP
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_id         TEXT NOT NULL,
+            to_id           TEXT,
+            namespace       TEXT NOT NULL,
+            content         TEXT NOT NULL,
+            read_flag       INTEGER DEFAULT 0,
+            push_delivered  INTEGER DEFAULT 0,
+            timestamp       DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_messages_to_id ON messages(to_id, read_flag);
@@ -70,6 +71,14 @@ async def init_db(db_path: str = DB_PATH) -> aiosqlite.Connection:
         CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assignee_id);
     """)
     await db.commit()
+
+    # Migration: add push_delivered column if missing (existing DBs)
+    try:
+        await db.execute("ALTER TABLE messages ADD COLUMN push_delivered INTEGER DEFAULT 0")
+        await db.commit()
+    except Exception:
+        pass  # Column already exists
+
     return db
 
 
@@ -242,6 +251,30 @@ async def get_unread_messages(db: aiosqlite.Connection, session_id: str) -> list
         )
         await db.commit()
     return messages
+
+
+async def mark_push_delivered(db: aiosqlite.Connection, msg_id: int) -> None:
+    """Mark a message as successfully push-delivered."""
+    await db.execute("UPDATE messages SET push_delivered = 1 WHERE id = ?", (msg_id,))
+    await db.commit()
+
+
+async def get_undelivered_messages(db: aiosqlite.Connection) -> list[dict]:
+    """Get messages that were stored but push delivery failed (older than 5 seconds)."""
+    cursor = await db.execute(
+        """SELECT m.id, m.from_id, m.to_id, m.content, m.timestamp,
+                  p.channel_url, COALESCE(sender.role, 'unknown') AS from_role
+           FROM messages m
+           JOIN peers p ON m.to_id = p.session_id
+           LEFT JOIN peers sender ON m.from_id = sender.session_id
+           WHERE m.push_delivered = 0
+             AND m.to_id IS NOT NULL
+             AND datetime(m.timestamp, '+5 seconds') < datetime('now')
+           ORDER BY m.timestamp
+           LIMIT 20"""
+    )
+    rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
 
 
 # --- File lock operations ---

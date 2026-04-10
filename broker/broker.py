@@ -40,6 +40,7 @@ logging.basicConfig(
 # Global database connection
 _db = None
 _cleanup_task = None
+_redeliver_task = None
 
 # Spawn configuration (set at startup via CLI args)
 _spawn_config = {
@@ -57,15 +58,20 @@ async def get_db():
     return _db
 
 
-async def deliver_to_channel(channel_url: str, payload: dict) -> bool:
-    """Deliver a message to a channel server's /push endpoint."""
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(channel_url, json=payload)
-            return resp.status_code == 200
-    except Exception as e:
-        logger.warning(f"Failed to deliver to {channel_url}: {e}")
-        return False
+async def deliver_to_channel(channel_url: str, payload: dict, retries: int = 3) -> bool:
+    """Deliver a message to a channel server's /push endpoint with retry."""
+    for attempt in range(retries):
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(channel_url, json=payload)
+                if resp.status_code == 200:
+                    return True
+                logger.warning(f"Delivery to {channel_url} returned {resp.status_code} (attempt {attempt + 1}/{retries})")
+        except Exception as e:
+            logger.warning(f"Delivery to {channel_url} failed (attempt {attempt + 1}/{retries}): {e}")
+        if attempt < retries - 1:
+            await asyncio.sleep(1.0 * (attempt + 1))
+    return False
 
 
 async def cleanup_loop():
@@ -80,14 +86,37 @@ async def cleanup_loop():
             logger.error(f"Cleanup error: {e}")
 
 
+async def redeliver_loop():
+    """Periodically retry push delivery for undelivered messages."""
+    while True:
+        await asyncio.sleep(10)
+        try:
+            undelivered = await db.get_undelivered_messages(_db)
+            for msg in undelivered:
+                payload = {
+                    "from_id": msg["from_id"],
+                    "from_role": msg["from_role"],
+                    "content": msg["content"],
+                    "timestamp": msg["timestamp"],
+                }
+                success = await deliver_to_channel(msg["channel_url"], payload, retries=1)
+                if success:
+                    await db.mark_push_delivered(_db, msg["id"])
+                    logger.info(f"Redelivered message {msg['id']} to {msg['to_id']}")
+        except Exception as e:
+            logger.warning(f"Redeliver loop error: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _db, _cleanup_task
+    global _db, _cleanup_task, _redeliver_task
     _db = await init_db(DB_PATH)
     _cleanup_task = asyncio.create_task(cleanup_loop())
+    _redeliver_task = asyncio.create_task(redeliver_loop())
     logger.info(f"Broker started (version {VERSION})")
     yield
     _cleanup_task.cancel()
+    _redeliver_task.cancel()
     if _db:
         await _db.close()
     logger.info("Broker stopped")
@@ -295,11 +324,13 @@ async def send_message(req: MessageSend):
         "timestamp": db.now_iso(),
     }
     delivered = await deliver_to_channel(recipient["channel_url"], payload)
+    if delivered:
+        await db.mark_push_delivered(conn, msg_id)
 
     logger.info(f"Message {msg_id}: {req.from_id} -> {req.to_id} (delivered={delivered})")
     result = {"status": "ok", "message_id": f"msg-{msg_id:03d}"}
     if not delivered:
-        result["warning"] = f"メッセージは保存されましたが、{req.to_id} への配信に失敗しました"
+        result["warning"] = f"メッセージは保存されましたが、{req.to_id} への配信に失敗しました。再配信を自動リトライします"
     return result
 
 
@@ -321,7 +352,7 @@ async def broadcast_message(req: BroadcastSend):
             continue  # Don't send to self
 
         # Store individual message
-        await db.store_message(conn, req.from_id, s["session_id"], namespace, req.content)
+        bc_msg_id = await db.store_message(conn, req.from_id, s["session_id"], namespace, req.content)
 
         # Deliver
         payload = {
@@ -332,6 +363,7 @@ async def broadcast_message(req: BroadcastSend):
         }
         success = await deliver_to_channel(s["channel_url"], payload)
         if success:
+            await db.mark_push_delivered(conn, bc_msg_id)
             delivered_to.append(s["session_id"])
         else:
             failed_to.append(s["session_id"])
