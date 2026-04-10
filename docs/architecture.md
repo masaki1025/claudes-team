@@ -24,6 +24,7 @@ Channel Server ──HTTP──→ Broker (SQLite) ──HTTP──→ Channel S
 |---|---|
 | **Dispatcher** | 司令塔。タスク分解・Worker へのアサイン・進捗管理 |
 | **Worker** (複数) | 実行者。アサインされたファイルを編集し完了報告 |
+| **Codex Reviewer** | レビュー専任。Worker の成果物をレビューし問題を報告 |
 | **Broker** | 中央サーバー。メッセージルーティング・ファイルロック・状態管理 |
 | **Channel Server** | 各セッションに1つ。Claude Code と Broker の間を MCP で中継 |
 
@@ -100,8 +101,10 @@ Dispatcher は `spawn_worker()` ツールを使って、タスクに応じた数
 1. 人間がゴールを伝える
 2. Dispatcher がタスクを分解し、必要な Worker 数を判断
 3. spawn_worker() を必要回数呼び出す
-4. Broker が Worker ディレクトリを作成し、Windows Terminal に新タブを追加
-5. Worker が起動したらタスクをアサイン
+4. Broker が Worker ディレクトリを作成し、Codex Reviewer も自動追加
+5. Windows Terminal に 2x2 グリッドで一括表示
+6. Worker が起動したらタスクをアサイン
+7. 全タスク完了後、TASK-REVIEW で Reviewer にコードレビューを依頼
 ```
 
 事前に `-workers N` で固定数を起動することも可能です（従来の動作）。
@@ -124,7 +127,7 @@ Dispatcher は `spawn_worker()` ツールを使って、タスクに応じた数
 | `set_role` | ロール宣言（Backend, Frontend 等） |
 | `set_summary` | 現在のタスク状況を更新 |
 | `set_mode` | 自律性モード切替（MANUAL / HYBRID / FULL_AUTO） |
-| `spawn_worker` | 新しい Worker を動的に起動（Dispatcher 専用） |
+| `spawn_worker` | 新しい Claude Worker を動的に起動（Dispatcher 専用。Codex Reviewer は自動追加） |
 
 ---
 
