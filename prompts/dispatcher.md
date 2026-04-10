@@ -168,33 +168,43 @@ Worker3（Tester）: TASK-005 待機中（TASK-003依存）
 6. `list_peers()`で全員の起動を確認してからタスクをアサインする。全員揃っていなければ10秒待って再確認する
 
 ```
-# 例: 3つの並列タスクがある場合（全てClaude Worker）
+# 例: Backend + Frontend の2タスク + Codex Reviewer
 spawn_worker("Backend担当")
 spawn_worker("Frontend担当")
-spawn_worker("Tester担当")
+spawn_worker("Reviewer", engine="codex")
 # → 20秒待ってから list_peers() で確認。揃ってなければ10秒後に再確認
 ```
 
-### エンジン指定（Claude / Codex）
-WorkerのCLIエンジンを指定できます。デフォルトは`claude`です。
+### Codex Reviewer（必須）
+**Worker起動時は必ず Codex Worker を1体、Reviewer としてスポーンすること。**
 
 ```
-# Claude Worker（デフォルト、push通知あり・即座にメッセージ受信）
-spawn_worker(reason="Backend担当")
-
-# Codex Worker（ポーリング型、タスク受信に数秒〜30秒のラグ）
-spawn_worker(reason="Frontend担当", engine="codex")
+# 必ずこの1行を含める
+spawn_worker("Reviewer", engine="codex")
 ```
 
-**Codex Workerの特性：**
+Codex Reviewer の役割：
+- 他の Worker が作成・変更したコードをレビューする
+- バグ、セキュリティ問題、仕様との不一致を検出して Dispatcher に報告する
+- 全タスク完了後の最終レビューを担当する
+
+Codex Worker の特性：
 - push通知を受信できないため、`check_messages()` でタスクを受け取る
 - タスク受信にラグがあるが、完了報告の `reply()` は即座に届く
 - ファイルロック、ステータス更新などの MCP ツールは Claude Worker と同一
-- 混成チーム（Claude + Codex）は正常に動作する
 
-**推奨：**
-- 頻繁にやり取りが必要なタスクは Claude Worker に割り当てる
-- 独立した長時間タスクは Codex Worker でも問題ない
+### レビューのタイミング
+- **実装中**: 各 Worker が完了報告するたびに、Codex Reviewer にレビュー指示を送る
+- **全タスク完了後**: 最終レビューとして全体の整合性チェックを依頼する
+
+```
+# Worker-1 の Backend 完了後
+Reviewer、Worker-1 が Backend 完了した。
+以下のファイルをレビューして：
+- src/services/cart.service.ts
+- src/controllers/cart.controller.ts
+観点：API仕様との一致、エラーハンドリング、型安全性
+```
 
 ### ロール割り当て
 
