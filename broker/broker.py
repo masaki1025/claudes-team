@@ -467,22 +467,19 @@ async def spawn_worker(req: SpawnRequest):
     claude_cmd = "claude --dangerously-load-development-channels server:claude-peers"
     pane_cmd = f"--title \"{worker_name}\" --startingDirectory \"{worker_dir}\" cmd /k {claude_cmd}"
     if _spawn_config["split"]:
-        # 2x2 grid layout (all panes equal size):
-        #   1 worker: [D | W1]              50/50
-        #   2 workers: [D | W1] / [W2 |  ]  focus-pane → split
-        #   3 workers: [D | W1] / [W2 | W3] 2x2 grid, each 25%
+        # 2x2 grid layout (single wt command with chained actions):
+        #   1 worker:  [D | W1]
+        #   2 workers: [D | W1] / [W2 |   ]
+        #   3 workers: [D | W1] / [W2 | W3]
         if next_num == 1:
+            # D | W1 (vertical split, 50/50)
             wt_args = f"-w 0 split-pane --vertical --size 0.5 {pane_cmd}"
         elif next_num == 2:
-            # Focus W1 (pane 1), then split horizontally
-            subprocess.Popen(["wt", "-w", "0", "focus-pane", "-t", "1"])
-            await asyncio.sleep(1.0)
-            wt_args = f"-w 0 split-pane --horizontal --size 0.5 {pane_cmd}"
+            # Navigate to D (first pane), split horizontally → W2 below D
+            wt_args = f"-w 0 move-focus --direction first ; split-pane --horizontal --size 0.5 {pane_cmd}"
         elif next_num == 3:
-            # Focus D (pane 0), then split horizontally → 2x2 grid
-            subprocess.Popen(["wt", "-w", "0", "focus-pane", "-t", "0"])
-            await asyncio.sleep(1.0)
-            wt_args = f"-w 0 split-pane --horizontal --size 0.5 {pane_cmd}"
+            # Navigate to W1 (first → right), split horizontally → W3 below W1 → 2x2
+            wt_args = f"-w 0 move-focus --direction first ; move-focus --direction right ; split-pane --horizontal --size 0.5 {pane_cmd}"
         else:
             wt_args = f"-w 0 split-pane --horizontal --size 0.5 {pane_cmd}"
     else:
