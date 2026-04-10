@@ -48,7 +48,7 @@ _spawn_config = {
     "tsx_path": None,
     "mode": "HYBRID",
     "max_workers": 8,
-    "permissions": ["Bash", "Edit", "Write", "Read", "Glob", "Grep", "WebFetch", "mcp__*"],
+    "permissions": ["Bash", "Edit", "Write", "Read", "Glob", "Grep", "WebFetch", "mcp__claude-peers"],
 }
 
 

@@ -111,7 +111,7 @@ Write-Host "  .mcp.json を生成しました" -ForegroundColor Green
 # 権限設定を生成（全ツール許可 → 確認プロンプトを抑制）
 $settingsJson = @{
   permissions = @{
-    allow = @("Bash", "Edit", "Write", "Read", "Glob", "Grep", "WebFetch", "mcp__*")
+    allow = @("Bash", "Edit", "Write", "Read", "Glob", "Grep", "WebFetch", "mcp__claude-peers")
   }
 } | ConvertTo-Json -Depth 5
 
