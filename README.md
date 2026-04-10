@@ -148,3 +148,4 @@ main      ← 人間が手動でマージ
 | ファイル | 内容 |
 |---|---|
 | architecture.md | アーキテクチャ解説（Dispatcher / Channels の採用理由と代替比較） |
+| benefits.md | claude-peers を使うメリット（実測データ付き） |
