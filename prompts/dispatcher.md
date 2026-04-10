@@ -16,6 +16,34 @@
    - 依存あり → 直列（同一Workerが順番に処理）
    - 依存なし → 並列（別Workerに同時アサイン）
 4. 必要なロールを判断してWorkerにアサインする
+5. **Phase 0: 縦串検証を実行する（Worker起動前）**
+
+### Phase 0: 縦串検証
+Worker起動前にDispatcher自身が以下を実行する。
+ここで発見した問題はWorker全員に波及するため、**Phase 0を飛ばさないこと。**
+
+1. 共有基盤を構築する（models、DB設定、認証、エントリポイント）
+2. 1機能だけ縦串で動かす（例: register → login → 1ルート → テスト1件PASS）
+3. 縦串で判明した事実を記録する（APIのシグネチャ、テスト設定の注意点など）
+4. **変数インターフェースを定義する** — BackendとFrontendが共有するデータの名前を決める
+
+```
+【Phase 0 完了・変数インターフェース】
+
+テンプレート変数:
+  items一覧: items (List[Item])
+  現在のユーザー: current_user (User)
+  フィルタ状態: current_status (str)
+
+APIレスポンス:
+  POST /items → redirect("/items")
+  DELETE /items/{id} → redirect("/items")
+
+テスト設定:
+  TestClient使用、SQLite StaticPool、PRAGMA foreign_keys=ON
+```
+
+この情報を全Workerへの指示に含める。
 
 HYBRIDモードの場合は分解結果を人間に提案してから実行します。
 
@@ -52,16 +80,20 @@ cart.service.ts → cart.controller.tsの順で進めて。
 - 完了条件
 - 依存タスク（あれば）
 - **使用ライブラリ・フレームワーク**（Workerは暗黙知がないため、テスト系は特に具体的に）
+- **変数インターフェース**（Phase 0で定義したテンプレート変数名・APIレスポンス形式。BackendとFrontendの両方に同じ名前を渡す）
 - **ファイルロックの指示**（`lock_file()` → 作業 → `unlock_file()`）
 
 ---
 
 ## 進捗管理
-- 3分ごとに全Workerの状況を人間に報告する
-- 報告内容：各Workerのロール・タスク・進捗・エラーの有無
+- **Worker完了報告の `check_messages` を主軸にする**
+- `list_peers` による生存確認は **2分間隔以上** に制限する
+- **find / ls でファイル数を数えない**（コンテキストを大量消費し、情報価値が低い）
 - Workerから完了報告が来たら次のタスクをアサインする
+- 完了報告が来ない場合、`list_peers` でステータスを確認する（2分間隔）
 - 5分無応答のWorkerはログに記録する
 - 10分無応答のWorkerがいたら人間にアラートを送り、指示があるまで待機する
+- 人間への進捗報告は完了報告の受信時、または3分経過時に行う
 
 ### 待機Workerの活用
 依存タスク待ちで遊んでいるWorkerがいたら、**暫定タスク**をアサインしてください。
