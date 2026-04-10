@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 Write-Host "claude-peers 環境セットアップ" -ForegroundColor Cyan
 Write-Host ""
@@ -66,7 +66,7 @@ Write-Host "  完了" -ForegroundColor Green
 # Step 3: システムプロンプト配置
 Write-Host "[3/3] システムプロンプトを配置..." -ForegroundColor Yellow
 $claudePeersHome = Join-Path $HOME ".claude-peers"
-New-Item -ItemType Directory -Force -Path (Join-Path $claudePeersHome "logs" "sessions") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path (Join-Path $claudePeersHome "logs") "sessions") | Out-Null
 
 $promptsDir = Join-Path $scriptDir "prompts"
 $dispatcherSrc = Join-Path $promptsDir "dispatcher.md"

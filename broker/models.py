@@ -40,3 +40,8 @@ class ModeUpdate(BaseModel):
 class LockRequest(BaseModel):
     session_id: str
     file_path: str
+
+
+class SpawnRequest(BaseModel):
+    namespace: str
+    requested_by: str

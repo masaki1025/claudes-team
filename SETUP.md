@@ -26,7 +26,7 @@ claude`s team/
   channel/                       チャネルサーバー（TypeScript / MCP SDK）
     channel-server.ts              MCP チャネルサーバー本体
     broker-client.ts               ブローカー HTTP クライアント
-    tools.ts                       MCP ツール定義（10ツール）
+    tools.ts                       MCP ツール定義（11ツール）
     types.ts                       型定義
     package.json
     node_modules/                  Node依存（git管理外）
@@ -39,9 +39,12 @@ claude`s team/
     channel-server-design.md
     start-peers-design.md
     implementation-guide.md
+  docs/                          アーキテクチャ解説
   setup.ps1                      環境構築スクリプト
   start-peers.ps1                起動スクリプト
   stop-peers.ps1                 停止スクリプト
+  claude-peers.cmd               起動ラッパー（cmd用）
+  stop-peers.cmd                 停止ラッパー（cmd用）
 ```
 
 ### ランタイムで生成されるファイル（git管理外）
@@ -52,9 +55,12 @@ claude`s team/
   worker.md                        setup.ps1 が prompts/ からコピー
   logs/sessions/                   セッションログ
 
-<対象プロジェクト>/.claude-peers/  MCP設定（start-peers.ps1 が生成）
-  dispatcher/.mcp.json
-  worker/.mcp.json
+<対象プロジェクト>/.claude-peers/  MCP設定（start-peers.ps1 / Broker が生成）
+  dispatcher/.mcp.json             Dispatcher用 MCP設定
+  dispatcher/.claude/settings.json 権限設定（全ツール許可）
+  worker-1/.mcp.json               Worker用 MCP設定（動的生成も可）
+  worker-1/.claude/settings.json   権限設定
+  .broker.pid                      ブローカーのPID
 ```
 
 ---
@@ -87,23 +93,38 @@ cd "claude`s team"
 
 ## 起動方法
 
-### 通常起動
+### 通常起動（Dispatcher のみ、Worker は動的）
 
 ```powershell
-# 対象プロジェクトのフォルダで実行
+# PowerShell
 cd C:\path\to\your-project
-C:\path\to\claude`s team\start-peers.ps1
+C:\path\to\claude`s team\start-peers.ps1 -project my-app
+
+# cmd
+cd C:\path\to\your-project
+C:\path\to\claude`s team\claude-peers.cmd -project my-app
 ```
+
+Dispatcher がゴールを受け取ると、タスクを分解し、必要な Worker 数を判断して `spawn_worker()` で自動起動します。
 
 ### オプション指定
 
 ```powershell
-.\start-peers.ps1                          # デフォルト: Worker 3体, HYBRID, タブ表示
-.\start-peers.ps1 -workers 4              # Worker数を変更
+.\start-peers.ps1                          # デフォルト: Dispatcherのみ, HYBRID
+.\start-peers.ps1 -workers 3              # Worker 3体を事前起動
+.\start-peers.ps1 -workers 2 -split       # 事前起動 + 分割表示
 .\start-peers.ps1 -mode FULL_AUTO         # 完全自律モードで起動
 .\start-peers.ps1 -project my-app         # プロジェクト名を明示
-.\start-peers.ps1 -split                  # 全セッションを1画面に分割表示
+.\start-peers.ps1 -clean                  # 前回のセッション状態をリセット
 ```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `-project` | カレントフォルダ名 | namespace（プロジェクト識別子） |
+| `-workers` | 0 | 事前起動する Worker 数。0 なら Dispatcher が動的に決定 |
+| `-mode` | HYBRID | 自律性モード（MANUAL / HYBRID / FULL_AUTO） |
+| `-split` | なし | 事前起動 Worker をペイン分割表示 |
+| `-clean` | なし | 前回のセッション状態を削除して起動 |
 
 ### 起動時に自動で行われること
 
@@ -111,16 +132,33 @@ C:\path\to\claude`s team\start-peers.ps1
 2. ヘルスチェックで起動確認（最大5回リトライ）
 3. プロジェクトフォルダに `.claude-peers/` が生成される
    - `dispatcher/.mcp.json` -- Dispatcher用 MCP設定
-   - `worker/.mcp.json` -- Worker用 MCP設定
+   - `dispatcher/.claude/settings.json` -- 権限設定（全ツール許可）
+   - Worker 指定時は `worker-N/` も生成
 4. `.gitignore` に `.claude-peers/` が追記される（初回のみ）
-5. Windows Terminal で Dispatcher + Worker N体のタブが開く
-6. 各セッションが `--dangerously-load-development-channels server:claude-peers` で起動
+5. Windows Terminal で Dispatcher（+ 事前起動 Worker）のタブが開く
+6. 各セッションが `--resume --dangerously-load-development-channels server:claude-peers` で起動
 7. 各チャネルサーバーが指定された `--mode` でブローカーに登録
+
+### セッションの再開
+
+CLI が落ちても `-clean` を付けずに再起動すれば、`--resume` により前回の会話を引き継ぎます。
+
+```powershell
+# 前回の状態を引き継いで再開
+.\start-peers.ps1 -project my-app
+
+# 新しいタスクを始める場合はリセット
+.\start-peers.ps1 -project my-app -clean
+```
 
 ### 停止
 
 ```powershell
+# PowerShell
 .\stop-peers.ps1
+
+# cmd
+C:\path\to\claude`s team\stop-peers.cmd
 ```
 
 停止時の処理:

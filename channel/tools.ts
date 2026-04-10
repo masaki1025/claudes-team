@@ -109,4 +109,15 @@ export const TOOLS: Tool[] = [
       required: ["mode"],
     },
   },
+  {
+    name: "spawn_worker",
+    description: "新しいWorkerを起動する（Dispatcher専用）。タスク分解後に必要なWorker数だけ呼び出す。",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        reason: { type: "string", description: "Workerが必要な理由（ログ用）" },
+      },
+      required: ["reason"],
+    },
+  },
 ];

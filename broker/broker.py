@@ -2,11 +2,14 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import signal
+import subprocess
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 import uvicorn
@@ -22,6 +25,7 @@ from models import (
     MessageSend,
     BroadcastSend,
     LockRequest,
+    SpawnRequest,
 )
 
 VERSION = "1.0.0"
@@ -36,6 +40,16 @@ logging.basicConfig(
 # Global database connection
 _db = None
 _cleanup_task = None
+
+# Spawn configuration (set at startup via CLI args)
+_spawn_config = {
+    "project_dir": None,
+    "channel_script": None,
+    "tsx_path": None,
+    "mode": "HYBRID",
+    "max_workers": 8,
+    "permissions": ["Bash", "Edit", "Write", "Read", "Glob", "Grep", "WebFetch", "mcp__*"],
+}
 
 
 async def get_db():
@@ -390,6 +404,70 @@ async def list_locks(namespace: str = Query(...)):
 
 
 # ===================
+# Worker spawning
+# ===================
+
+@app.post("/spawn")
+async def spawn_worker(req: SpawnRequest):
+    conn = await get_db()
+
+    # Validate requester is dispatcher
+    requester = await db.get_session(conn, req.requested_by)
+    if not requester or requester["role"] != "dispatcher":
+        error_response("FORBIDDEN", "spawn はDispatcherのみ実行できます", 403)
+
+    # Check spawn config
+    if not _spawn_config["project_dir"]:
+        error_response("NOT_CONFIGURED", "spawn 設定が未構成です（--project-dir が必要）", 500)
+
+    # Check max workers
+    next_num = await db.get_next_worker_number(conn, req.namespace)
+    if next_num > _spawn_config["max_workers"]:
+        error_response("LIMIT_REACHED", f"Worker数上限 ({_spawn_config['max_workers']}) に達しています")
+
+    worker_name = f"worker-{next_num}"
+    project_dir = _spawn_config["project_dir"]
+    claude_peers_dir = Path(project_dir) / ".claude-peers"
+    worker_dir = claude_peers_dir / worker_name
+
+    # Create worker directory with .mcp.json
+    worker_dir.mkdir(parents=True, exist_ok=True)
+    channel_script = _spawn_config["channel_script"].replace("\\", "/")
+    mcp_config = {
+        "mcpServers": {
+            "claude-peers": {
+                "command": _spawn_config["tsx_path"],
+                "args": [
+                    channel_script,
+                    "--role", "worker",
+                    "--namespace", req.namespace,
+                    "--broker", f"http://127.0.0.1:{app.state.port}",
+                    "--mode", _spawn_config["mode"],
+                ],
+            }
+        }
+    }
+    (worker_dir / ".mcp.json").write_text(json.dumps(mcp_config, indent=2), encoding="utf-8")
+
+    # Create .claude/settings.json
+    settings_dir = worker_dir / ".claude"
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    settings = {"permissions": {"allow": _spawn_config["permissions"]}}
+    (settings_dir / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+    # Launch Windows Terminal tab
+    claude_cmd = "claude --dangerously-load-development-channels server:claude-peers"
+    wt_args = f"-w 0 new-tab --title \"{worker_name}\" --startingDirectory \"{worker_dir}\" cmd /k {claude_cmd}"
+    try:
+        subprocess.Popen(f"wt {wt_args}", shell=True)
+    except Exception as e:
+        error_response("SPAWN_FAILED", f"Worker起動に失敗しました: {e}", 500)
+
+    logger.info(f"Spawned {worker_name} for namespace {req.namespace}")
+    return {"status": "ok", "worker_id": worker_name}
+
+
+# ===================
 # Entry point
 # ===================
 
@@ -397,6 +475,21 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="claude-peers broker daemon")
     parser.add_argument("--port", type=int, default=7799, help="Port to listen on")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to bind to")
+    parser.add_argument("--project-dir", type=str, default=None, help="Project directory path")
+    parser.add_argument("--channel-script", type=str, default=None, help="Path to channel-server.ts")
+    parser.add_argument("--tsx-path", type=str, default=None, help="Path to tsx.cmd")
+    parser.add_argument("--mode", type=str, default="HYBRID", help="Autonomy mode")
+    parser.add_argument("--max-workers", type=int, default=8, help="Maximum number of workers")
     args = parser.parse_args()
+
+    # Store spawn configuration
+    _spawn_config["project_dir"] = args.project_dir
+    _spawn_config["channel_script"] = args.channel_script
+    _spawn_config["tsx_path"] = args.tsx_path
+    _spawn_config["mode"] = args.mode
+    _spawn_config["max_workers"] = args.max_workers
+
+    # Store port in app state for spawn endpoint
+    app.state.port = args.port
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

@@ -167,4 +167,17 @@ export class BrokerClient {
     const data = await this.request(`/locks?namespace=${encodeURIComponent(this.namespace)}`);
     return data.locks;
   }
+
+  // --- Worker spawning ---
+
+  async spawnWorker(reason: string): Promise<{ worker_id: string }> {
+    const sid = this.requireSession();
+    return this.request("/spawn", {
+      method: "POST",
+      body: JSON.stringify({
+        namespace: this.namespace,
+        requested_by: sid,
+      }),
+    });
+  }
 }

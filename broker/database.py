@@ -328,3 +328,21 @@ async def release_session_locks(db: aiosqlite.Connection, session_id: str) -> in
     )
     await db.commit()
     return cursor.rowcount
+
+
+async def get_next_worker_number(db: aiosqlite.Connection, namespace: str) -> int:
+    """Return the next available worker number for the namespace."""
+    cursor = await db.execute(
+        "SELECT session_id FROM peers WHERE namespace = ? AND session_id LIKE 'worker-%'",
+        (namespace,),
+    )
+    rows = await cursor.fetchall()
+    max_num = 0
+    for r in rows:
+        try:
+            num = int(dict(r)["session_id"].split("-")[1])
+            if num > max_num:
+                max_num = num
+        except (IndexError, ValueError):
+            pass
+    return max_num + 1

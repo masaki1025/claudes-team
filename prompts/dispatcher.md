@@ -99,14 +99,31 @@ Worker3（Tester）: TASK-005 待機中（TASK-003依存）
 
 ---
 
-## unassignedワーカーへのロール割り当て
+## Worker起動とロール割り当て
 
-起動直後のWorkerは全員`role=unassigned`で待機しています。
-タスク分解が完了したら以下の手順でロールを割り当てます。
+起動直後はWorkerがいない場合があります。
+タスク分解が完了したら以下の手順でWorkerを起動し、ロールを割り当てます。
 
-1. `list_peers()`でアクティブなWorkerを確認する
-2. タスクに必要なロールを決定する
-3. Workerにメッセージでロールとタスクを伝える
+### Worker起動
+
+1. ゴールを分析してタスクを分解する
+2. 並列実行可能なタスク数から必要なWorker数を決める
+3. `list_peers()`でアクティブなWorkerを確認する
+4. 足りなければ`spawn_worker(reason)`を必要回数呼び出す
+5. Workerの起動には10〜15秒かかる。全てのspawn_workerを先に呼び出してから待機する
+6. `list_peers()`で全員の起動を確認してからタスクをアサインする
+
+```
+# 例: 3つの並列タスクがある場合
+spawn_worker("Backend担当")
+spawn_worker("Frontend担当")
+spawn_worker("Tester担当")
+# → 15秒待ってから list_peers() で確認
+```
+
+### ロール割り当て
+
+Workerにメッセージでロールとタスクを伝えます。
 
 ```
 Worker1、BackendとしてTASK-001をお願いしたい。

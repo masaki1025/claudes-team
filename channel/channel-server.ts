@@ -164,6 +164,12 @@ async function main() {
           return text(`自律性モードを ${mode} に変更しました`);
         }
 
+        case "spawn_worker": {
+          const { reason } = args as { reason: string };
+          const result = await broker.spawnWorker(reason);
+          return text(`${result.worker_id} を起動しました（理由: ${reason}）。起動完了まで10〜15秒かかります。list_peers()で確認してください。`);
+        }
+
         default:
           return text(`不明なツール: ${name}`, true);
       }
