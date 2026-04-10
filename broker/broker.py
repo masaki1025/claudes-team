@@ -520,8 +520,11 @@ async def spawn_worker(req: SpawnRequest):
     if not _spawn_config["project_dir"]:
         error_response("NOT_CONFIGURED", "spawn 設定が未構成です（--project-dir が必要）", 500)
 
-    # Check max workers
+    # Check max workers (consider both DB sessions and queued spawns)
     next_num = await db.get_next_worker_number(conn, req.namespace)
+    queued_nums = [w["num"] for w in _spawn_queue]
+    if queued_nums:
+        next_num = max(next_num, max(queued_nums) + 1)
     if next_num > _spawn_config["max_workers"]:
         error_response("LIMIT_REACHED", f"Worker数上限 ({_spawn_config['max_workers']}) に達しています")
 
