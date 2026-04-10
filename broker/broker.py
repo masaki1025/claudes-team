@@ -116,6 +116,9 @@ async def redeliver_loop():
 async def lifespan(app: FastAPI):
     global _db, _cleanup_task, _redeliver_task
     _db = await init_db(DB_PATH)
+    # Mark all pre-existing messages as delivered to avoid redeliver storm on restart
+    await _db.execute("UPDATE messages SET push_delivered = 1 WHERE push_delivered = 0")
+    await _db.commit()
     _cleanup_task = asyncio.create_task(cleanup_loop())
     _redeliver_task = asyncio.create_task(redeliver_loop())
     logger.info(f"Broker started (version {VERSION})")

@@ -75,6 +75,8 @@ async def init_db(db_path: str = DB_PATH) -> aiosqlite.Connection:
     # Migration: add push_delivered column if missing (existing DBs)
     try:
         await db.execute("ALTER TABLE messages ADD COLUMN push_delivered INTEGER DEFAULT 0")
+        # Mark all existing messages as delivered to avoid redeliver storm
+        await db.execute("UPDATE messages SET push_delivered = 1")
         await db.commit()
     except Exception:
         pass  # Column already exists
