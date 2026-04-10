@@ -28,12 +28,14 @@ Write-Host ""
 # Step 1: ブローカー起動
 Write-Host "ブローカーを起動中..." -ForegroundColor Yellow
 $projectDir = (Get-Location).Path
+$brokerArgs = @("broker.py", "--port", "7799",
+  "--project-dir", $projectDir,
+  "--channel-script", $channelScript,
+  "--tsx-path", $tsxPath,
+  "--mode", $mode)
+if (-not $tabs) { $brokerArgs += "--split" }
 $brokerProcess = Start-Process -FilePath $pythonPath `
-  -ArgumentList "broker.py", "--port", "7799", `
-    "--project-dir", $projectDir, `
-    "--channel-script", $channelScript, `
-    "--tsx-path", $tsxPath, `
-    "--mode", $mode `
+  -ArgumentList $brokerArgs `
   -WorkingDirectory $brokerDir `
   -PassThru -WindowStyle Hidden
 
@@ -113,6 +115,7 @@ $settingsJson = @{
   permissions = @{
     allow = @("Bash", "Edit", "Write", "Read", "Glob", "Grep", "WebFetch", "mcp__claude-peers")
   }
+  enableAllProjectMcpServers = $true
 } | ConvertTo-Json -Depth 5
 
 $roles = @("dispatcher")
@@ -154,11 +157,11 @@ $claudeCmd = "claude --dangerously-load-development-channels server:claude-peers
 
 if ($workers -eq 0) {
   # Dispatcher のみ起動（Workerは動的にspawn）
-  $wtCmd = "new-tab --title `"Dispatcher`" --tabColor `"#808080`" --startingDirectory `"$dispatcherDir`" cmd /k $claudeCmd"
+  $wtCmd = "new-tab --title `"Dispatcher`" --tabColor #808080 --startingDirectory `"$dispatcherDir`" cmd /k $claudeCmd"
 } elseif (-not $tabs) {
   # 分割表示モード: 均等サイズで分割
   $total = $workers + 1  # Dispatcher + Workers
-  $wtCmd = "new-tab --title `"Dispatcher`" --tabColor `"#808080`" --startingDirectory `"$dispatcherDir`" cmd /k $claudeCmd"
+  $wtCmd = "new-tab --title `"Dispatcher`" --tabColor #808080 --startingDirectory `"$dispatcherDir`" cmd /k $claudeCmd"
 
   # Worker を均等サイズで追加（各Worker個別ディレクトリ）
   for ($i = 1; $i -le $workers; $i++) {
@@ -173,7 +176,7 @@ if ($workers -eq 0) {
   }
 } else {
   # タブ表示モード（デフォルト）: Dispatcher はタブ色で区別
-  $wtCmd = "new-tab --title `"Dispatcher`" --tabColor `"#808080`" --startingDirectory `"$dispatcherDir`" cmd /k $claudeCmd"
+  $wtCmd = "new-tab --title `"Dispatcher`" --tabColor #808080 --startingDirectory `"$dispatcherDir`" cmd /k $claudeCmd"
 
   for ($i = 1; $i -le $workers; $i++) {
     $workerIDir = Join-Path $claudePeersDir "worker-$i"
@@ -201,7 +204,8 @@ Write-Host "  プロジェクト: $project" -ForegroundColor White
 Write-Host "  モード: $mode" -ForegroundColor White
 Write-Host ""
 Write-Host "  Dispatcherにゴールを伝えてください。" -ForegroundColor Cyan
-Write-Host "  終了: .\stop-peers.ps1" -ForegroundColor Yellow
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+Write-Host "  終了: $scriptDir\stop-peers.cmd" -ForegroundColor Yellow
 Write-Host ""
 
 # ブローカーのPIDを保存

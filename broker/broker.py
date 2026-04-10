@@ -48,6 +48,7 @@ _spawn_config = {
     "tsx_path": None,
     "mode": "HYBRID",
     "max_workers": 8,
+    "split": False,
     "permissions": ["Bash", "Edit", "Write", "Read", "Glob", "Grep", "WebFetch", "mcp__claude-peers"],
 }
 
@@ -411,9 +412,13 @@ async def list_locks(namespace: str = Query(...)):
 async def spawn_worker(req: SpawnRequest):
     conn = await get_db()
 
-    # Validate requester is dispatcher
+    # Validate requester is dispatcher (case-insensitive, also check session_id prefix)
     requester = await db.get_session(conn, req.requested_by)
-    if not requester or requester["role"] != "dispatcher":
+    is_dispatcher = (
+        requester
+        and (requester["role"].lower() == "dispatcher" or req.requested_by.startswith("dispatcher-"))
+    )
+    if not is_dispatcher:
         error_response("FORBIDDEN", "spawn はDispatcherのみ実行できます", 403)
 
     # Check spawn config
@@ -452,12 +457,36 @@ async def spawn_worker(req: SpawnRequest):
     # Create .claude/settings.json
     settings_dir = worker_dir / ".claude"
     settings_dir.mkdir(parents=True, exist_ok=True)
-    settings = {"permissions": {"allow": _spawn_config["permissions"]}}
+    settings = {
+        "permissions": {"allow": _spawn_config["permissions"]},
+        "enableAllProjectMcpServers": True,
+    }
     (settings_dir / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
 
-    # Launch Windows Terminal tab
+    # Launch Windows Terminal tab or split-pane
     claude_cmd = "claude --dangerously-load-development-channels server:claude-peers"
-    wt_args = f"-w 0 new-tab --title \"{worker_name}\" --startingDirectory \"{worker_dir}\" cmd /k {claude_cmd}"
+    pane_cmd = f"--title \"{worker_name}\" --startingDirectory \"{worker_dir}\" cmd /k {claude_cmd}"
+    if _spawn_config["split"]:
+        # 2x2 grid layout (all panes equal size):
+        #   1 worker: [D | W1]              50/50
+        #   2 workers: [D | W1] / [W2 |  ]  focus-pane → split
+        #   3 workers: [D | W1] / [W2 | W3] 2x2 grid, each 25%
+        if next_num == 1:
+            wt_args = f"-w 0 split-pane --vertical --size 0.5 {pane_cmd}"
+        elif next_num == 2:
+            # Focus W1 (pane 1), then split horizontally
+            subprocess.Popen(["wt", "-w", "0", "focus-pane", "-t", "1"])
+            await asyncio.sleep(1.0)
+            wt_args = f"-w 0 split-pane --horizontal --size 0.5 {pane_cmd}"
+        elif next_num == 3:
+            # Focus D (pane 0), then split horizontally → 2x2 grid
+            subprocess.Popen(["wt", "-w", "0", "focus-pane", "-t", "0"])
+            await asyncio.sleep(1.0)
+            wt_args = f"-w 0 split-pane --horizontal --size 0.5 {pane_cmd}"
+        else:
+            wt_args = f"-w 0 split-pane --horizontal --size 0.5 {pane_cmd}"
+    else:
+        wt_args = f"-w 0 new-tab {pane_cmd}"
     try:
         subprocess.Popen(f"wt {wt_args}", shell=True)
     except Exception as e:
@@ -480,6 +509,7 @@ if __name__ == "__main__":
     parser.add_argument("--tsx-path", type=str, default=None, help="Path to tsx.cmd")
     parser.add_argument("--mode", type=str, default="HYBRID", help="Autonomy mode")
     parser.add_argument("--max-workers", type=int, default=8, help="Maximum number of workers")
+    parser.add_argument("--split", action="store_true", help="Use split panes instead of tabs for spawned workers")
     args = parser.parse_args()
 
     # Store spawn configuration
@@ -488,6 +518,7 @@ if __name__ == "__main__":
     _spawn_config["tsx_path"] = args.tsx_path
     _spawn_config["mode"] = args.mode
     _spawn_config["max_workers"] = args.max_workers
+    _spawn_config["split"] = args.split
 
     # Store port in app state for spawn endpoint
     app.state.port = args.port
