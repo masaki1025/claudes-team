@@ -95,6 +95,8 @@ async def generate_session_id(db: aiosqlite.Connection, role: str, namespace: st
     """Generate a session_id based on role and namespace."""
     if role == "dispatcher":
         return "dispatcher-1"
+    if role == "reviewer":
+        return "reviewer"
     # Count existing workers in this namespace
     cursor = await db.execute(
         "SELECT COUNT(*) FROM peers WHERE namespace = ? AND session_id LIKE 'worker-%'",

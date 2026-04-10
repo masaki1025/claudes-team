@@ -116,7 +116,7 @@ async def redeliver_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _db, _cleanup_task, _redeliver_task
-    _db = await init_db(DB_PATH)
+    _db = await init_db(getattr(app.state, "db_path", DB_PATH))
     # Mark all pre-existing messages as delivered to avoid redeliver storm on restart
     await _db.execute("UPDATE messages SET push_delivered = 1 WHERE push_delivered = 0")
     await _db.commit()
@@ -336,6 +336,14 @@ async def send_message(req: MessageSend):
     if delivered:
         await db.mark_push_delivered(conn, msg_id)
 
+    # Reviewer 宛メッセージ → タスクファイルに書き出し（Codex 起動トリガー）
+    if req.to_id == "reviewer" and _spawn_config.get("project_dir"):
+        task_dir = Path(_spawn_config["project_dir"]) / ".claude-peers" / "reviewer"
+        task_dir.mkdir(parents=True, exist_ok=True)
+        # BOM 付き UTF-8 で書き出し（Codex が正しく読めるように）
+        (task_dir / "task.txt").write_bytes(b"\xef\xbb\xbf" + req.content.encode("utf-8"))
+        logger.info(f"Reviewer task file written")
+
     logger.info(f"Message {msg_id}: {req.from_id} -> {req.to_id} (delivered={delivered})")
     result = {"status": "ok", "message_id": f"msg-{msg_id:03d}"}
     if not delivered:
@@ -451,70 +459,77 @@ async def list_locks(namespace: str = Query(...)):
 
 
 def _build_wt_command(workers: list[dict], split: bool) -> str:
-    """Build a single wt command for batch worker launch.
+    """Build a single wt command for batch pane launch.
 
-    For split mode, creates a 2x2 grid layout (workers 1-3):
-        [D | W1] / [W2 | W3]
-    Workers 4+ fall back to new-tab.
+    Dispatcher is already running. Panes are added to its tab as a grid:
+        1 pane:  [D | P1]
+        2 panes: [D | P1] / [P2 |   ]
+        3 panes: [D | P1] / [P2 | P3]  → clean 2x2
+    Panes 4+ fall back to additional new-tabs.
+
+    Reviewer (Codex) uses start.cmd, Claude Workers use claude CLI.
     """
     claude_cmd = "claude --dangerously-load-development-channels server:claude-peers"
     parts: list[str] = []
 
-    for w in workers:
+    for idx, w in enumerate(workers):
+        num = idx + 1  # 1-based position in the grid
         if w.get("engine") == "codex":
-            codex_path = _spawn_config["codex_path"]
-            channel_script = _spawn_config["channel_script"].replace("\\", "/")
-            tsx_path = _spawn_config["tsx_path"].replace("\\", "/")
-            ns = w.get("namespace", "default")
-            port = _spawn_config.get("port", 7799)
-            mode = _spawn_config["mode"]
-            args_toml = ", ".join(f'"{a}"' for a in [
-                channel_script, "--role", "worker",
-                "--namespace", ns,
-                "--broker", f"http://127.0.0.1:{port}",
-                "--mode", mode,
-            ])
-            cli_cmd = (
-                f'{codex_path} --full-auto'
-                f' -c "mcp_servers.claude-peers.command=\\"{tsx_path}\\""'
-                f' -c "mcp_servers.claude-peers.args=[{args_toml}]"'
-                f' "check_messages() を呼んでタスクを受け取ってください"'
-            )
+            # start.cmd のフルパスを使用（作業ディレクトリと異なる場合がある）
+            start_cmd_path = w.get("start_cmd", "start.cmd")
+            cli_cmd = f'"{start_cmd_path}"'
         else:
             cli_cmd = claude_cmd
         pane_cmd = f'--title "{w["name"]}" --startingDirectory "{w["dir"]}" cmd /k {cli_cmd}'
 
-        if not split or w["num"] > 3:
+        if not split or num > 3:
             parts.append(f"new-tab {pane_cmd}")
-        elif w["num"] == 1:
-            # D | W1 (vertical split, 50/50)
+        elif num == 1:
+            # D | P1 (vertical split, Dispatcher の右に)
             parts.append(f"split-pane --vertical --size 0.5 {pane_cmd}")
-        elif w["num"] == 2:
-            # Focus D (left), split horizontally → W2 below D
+        elif num == 2:
+            # D の下に P2
             parts.append("move-focus --direction left")
             parts.append(f"split-pane --horizontal --size 0.5 {pane_cmd}")
-        elif w["num"] == 3:
-            # Focus W1 (right), split horizontally → W3 below W1 → 2x2
+        elif num == 3:
+            # P1 の下に P3 → 2x2 完成
             parts.append("move-focus --direction right")
             parts.append(f"split-pane --horizontal --size 0.5 {pane_cmd}")
 
     return "-w 0 " + " ; ".join(parts)
 
 
+_reviewer_spawned = False
+
+
 async def _flush_spawn_queue():
-    """Execute all queued spawns as a single wt command."""
-    global _spawn_queue
+    """Execute all queued spawns as a single wt command, including Reviewer."""
+    global _spawn_queue, _reviewer_spawned
     if not _spawn_queue:
         return
 
     workers = _spawn_queue[:]
     _spawn_queue = []
 
+    # Reviewer を初回バッチに自動追加（プロジェクトルートから起動）
+    if not _reviewer_spawned:
+        project_dir = _spawn_config.get("project_dir", "")
+        reviewer_start_cmd = Path(project_dir) / ".claude-peers" / "reviewer" / "start.cmd"
+        if reviewer_start_cmd.exists():
+            workers.append({
+                "name": "reviewer",
+                "dir": project_dir,  # プロジェクトルートから起動（ファイルアクセス権限）
+                "start_cmd": str(reviewer_start_cmd),  # start.cmd のフルパス
+                "engine": "codex",
+                "namespace": workers[0].get("namespace", "default") if workers else "default",
+            })
+            _reviewer_spawned = True
+
     wt_args = _build_wt_command(workers, _spawn_config["split"])
     try:
         subprocess.Popen(f"wt {wt_args}", shell=True)
         names = [w["name"] for w in workers]
-        logger.info(f"Batch spawned {len(workers)} workers: {names}")
+        logger.info(f"Batch spawned {len(workers)} panes: {names}")
     except Exception as e:
         logger.error(f"Batch spawn failed: {e}")
 
@@ -590,6 +605,16 @@ async def spawn_worker(req: SpawnRequest):
         if addendum_path.exists():
             addendum_md = addendum_path.read_text(encoding="utf-8")
         (worker_dir / "AGENTS.md").write_text(worker_md + "\n" + addendum_md, encoding="utf-8")
+
+        # start.cmd を生成（config.toml を読ませるので -c フラグ不要）
+        codex_path = _spawn_config["codex_path"]
+        start_cmd_content = (
+            f"@echo off\r\n"
+            f"chcp 65001 >nul\r\n"
+            f'{codex_path} --full-auto'
+            f' "check_messages() を呼んでタスクを確認してください。メッセージがなければ30秒待って再度 check_messages() を呼んでください。メッセージが届くまでこのポーリングを繰り返してください。"'
+        )
+        (worker_dir / "start.cmd").write_text(start_cmd_content, encoding="utf-8")
     else:
         # Claude: .mcp.json + .claude/settings.json
         mcp_config = {
@@ -654,6 +679,14 @@ if __name__ == "__main__":
     _spawn_config["max_workers"] = args.max_workers
     _spawn_config["split"] = args.split
     _spawn_config["codex_path"] = args.codex_path
+
+    # DB をプロジェクトの .claude-peers/ 配下に置く
+    if args.project_dir:
+        db_dir = Path(args.project_dir) / ".claude-peers"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        app.state.db_path = str(db_dir / "claude_peers.db")
+    else:
+        app.state.db_path = DB_PATH
 
     # Store port in app state for spawn endpoint
     app.state.port = args.port

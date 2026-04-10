@@ -2,7 +2,6 @@
   [string]$project = (Split-Path -Leaf (Get-Location)),
   [int]$workers = 0,
   [string]$mode = "HYBRID",
-  [string]$workerEngine = "claude",
   [switch]$tabs,
   [switch]$clean
 )
@@ -21,9 +20,9 @@ $pythonPath = Join-Path (Join-Path (Join-Path $brokerDir ".venv") "Scripts") "py
 
 Write-Host "claude-peers を起動します..." -ForegroundColor Cyan
 Write-Host "  プロジェクト : $project" -ForegroundColor Cyan
-Write-Host "  Worker数     : $(if ($workers -eq 0) { '動的（Dispatcherが決定）' } else { $workers })" -ForegroundColor Cyan
+Write-Host "  Claude Worker: $(if ($workers -eq 0) { '動的（Dispatcherが決定）' } else { $workers })" -ForegroundColor Cyan
+Write-Host "  Codex Reviewer: 1（常駐）" -ForegroundColor Cyan
 Write-Host "  モード       : $mode" -ForegroundColor Cyan
-Write-Host "  Workerエンジン: $workerEngine" -ForegroundColor Cyan
 Write-Host "  表示         : $(if ($tabs) { 'タブ表示' } else { '分割表示' })" -ForegroundColor Cyan
 Write-Host ""
 
@@ -67,11 +66,29 @@ if (-not $brokerReady) {
 }
 Write-Host "  ブローカー起動完了 (PID: $($brokerProcess.Id))" -ForegroundColor Green
 
-# Step 2: .mcp.json を Dispatcher用・Worker用にプロジェクトフォルダに生成
+# Step 2: 設定ファイル生成
 $claudePeersDir = Join-Path $projectDir ".claude-peers"
-
 $channelScriptEscaped = $channelScript -replace '\\', '/'
+$tsxPathEscaped = $tsxPath -replace '\\', '/'
 
+# セッション状態の管理
+if ($clean) {
+  if (Test-Path $claudePeersDir) {
+    Remove-Item $claudePeersDir -Recurse -Force
+  }
+  # Codex Reviewer 用のプロジェクトルート設定も削除
+  $codexCleanDir = Join-Path $projectDir ".codex"
+  if (Test-Path $codexCleanDir) { Remove-Item $codexCleanDir -Recurse -Force }
+  $agentsCleanPath = Join-Path $projectDir "AGENTS.md"
+  if (Test-Path $agentsCleanPath) { Remove-Item $agentsCleanPath -Force }
+  Write-Host "  前回のセッション状態を削除しました（-clean）" -ForegroundColor Yellow
+} elseif (Test-Path $claudePeersDir) {
+  Write-Host "  前回のセッション状態を引き継ぎます（リセットするには -clean を付けてください）" -ForegroundColor Cyan
+}
+
+# --- Dispatcher 用ディレクトリ ---
+$dispatcherDir = Join-Path $claudePeersDir "dispatcher"
+New-Item -ItemType Directory -Force -Path $dispatcherDir | Out-Null
 $dispatcherConfig = @{
   mcpServers = @{
     "claude-peers" = @{
@@ -80,68 +97,62 @@ $dispatcherConfig = @{
     }
   }
 } | ConvertTo-Json -Depth 5
+Write-Utf8NoBom (Join-Path $dispatcherDir ".mcp.json") $dispatcherConfig
 
-# セッション状態の管理
-if ($clean -and (Test-Path $claudePeersDir)) {
-  Remove-Item $claudePeersDir -Recurse -Force
-  Write-Host "  前回のセッション状態を削除しました（-clean）" -ForegroundColor Yellow
-} elseif (Test-Path $claudePeersDir) {
-  Write-Host "  前回のセッション状態を引き継ぎます（リセットするには -clean を付けてください）" -ForegroundColor Cyan
-}
+# --- Codex Reviewer 用設定（プロジェクトルートに配置） ---
+# Codex はプロジェクトルートから起動する（ファイルアクセス権限の問題を回避）
+# .codex/config.toml と AGENTS.md をプロジェクトルートに配置
+$codexDir = Join-Path $projectDir ".codex"
+New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
 
-# Dispatcher用ディレクトリ
-New-Item -ItemType Directory -Force -Path (Join-Path $claudePeersDir "dispatcher") | Out-Null
-Write-Utf8NoBom (Join-Path (Join-Path $claudePeersDir "dispatcher") ".mcp.json") $dispatcherConfig
-
-# Worker用ディレクトリ（事前起動分のみ。workers=0なら動的にBrokerが生成）
-if ($workers -gt 0) {
-  if ($workerEngine -eq "codex") {
-    # Codex: .codex/config.toml + AGENTS.md
-    $tsxPathEscaped = $tsxPath -replace '\\', '/'
-    $workerToml = @"
+$reviewerToml = @"
 [mcp_servers.claude-peers]
 command = "$tsxPathEscaped"
-args = ["$channelScriptEscaped", "--role", "worker", "--namespace", "$project", "--broker", "$brokerUrl", "--mode", "$mode"]
+args = ["$channelScriptEscaped", "--role", "reviewer", "--namespace", "$project", "--broker", "$brokerUrl", "--mode", "$mode"]
 "@
+Write-Utf8NoBom (Join-Path $codexDir "config.toml") $reviewerToml
 
-    # Read worker.md + codex addendum for AGENTS.md
-    $claudePeersHome = Join-Path $HOME ".claude-peers"
-    $workerMd = ""
-    $codexAddendum = ""
-    $workerMdPath = Join-Path $claudePeersHome "worker.md"
-    $addendumPath = Join-Path $claudePeersHome "worker-codex-addendum.md"
-    if (Test-Path $workerMdPath) { $workerMd = Get-Content $workerMdPath -Raw -Encoding UTF8 }
-    if (Test-Path $addendumPath) { $codexAddendum = Get-Content $addendumPath -Raw -Encoding UTF8 }
-    $agentsMd = $workerMd + "`n" + $codexAddendum
+# AGENTS.md: $HOME/.claude-peers/ を優先、なければ prompts/ からフォールバック
+$claudePeersHome = Join-Path $HOME ".claude-peers"
+$promptsDir = Join-Path $scriptDir "prompts"
+$workerMd = ""
+$codexAddendum = ""
+$workerMdPath = Join-Path $claudePeersHome "worker.md"
+if (-not (Test-Path $workerMdPath)) { $workerMdPath = Join-Path $promptsDir "worker.md" }
+$addendumPath = Join-Path $claudePeersHome "worker-codex-addendum.md"
+if (-not (Test-Path $addendumPath)) { $addendumPath = Join-Path $promptsDir "worker-codex-addendum.md" }
+if (Test-Path $workerMdPath) { $workerMd = Get-Content $workerMdPath -Raw -Encoding UTF8 }
+if (Test-Path $addendumPath) { $codexAddendum = Get-Content $addendumPath -Raw -Encoding UTF8 }
+Write-Utf8NoBom (Join-Path $projectDir "AGENTS.md") ($workerMd + "`n" + $codexAddendum)
 
-    for ($i = 1; $i -le $workers; $i++) {
-      $workerIDir = Join-Path $claudePeersDir "worker-$i"
-      New-Item -ItemType Directory -Force -Path $workerIDir | Out-Null
-      $codexDir = Join-Path $workerIDir ".codex"
-      New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
-      Write-Utf8NoBom (Join-Path $codexDir "config.toml") $workerToml
-      Write-Utf8NoBom (Join-Path $workerIDir "AGENTS.md") $agentsMd
-    }
-  } else {
-    # Claude: .mcp.json
-    $workerConfig = @{
-      mcpServers = @{
-        "claude-peers" = @{
-          command = $tsxPath
-          args = @($channelScriptEscaped, "--role", "worker", "--namespace", $project, "--broker", $brokerUrl, "--mode", $mode)
-        }
+# start.cmd（Codex Reviewer 起動用）
+# ファイルトリガー方式: task.txt が現れたら Codex を起動してレビュー実行
+$reviewerDir = Join-Path $claudePeersDir "reviewer"
+New-Item -ItemType Directory -Force -Path $reviewerDir | Out-Null
+$taskFile = "$claudePeersDir\reviewer\task.txt" -replace '\\', '/'
+$codexPrompt = ".claude-peers/reviewer/task.txt にレビュー依頼がある。ファイルを読んでレビュー対象のソースコードを全て確認し、レビュー結果を reply() で dispatcher-1 に送信してください。"
+$startCmd = "@echo off`r`nchcp 65001 >nul`r`ncd /d `"$projectDir`"`r`necho Reviewer 待機中... (task.txt を監視)`r`n:loop`r`nif exist `".claude-peers\reviewer\task.txt`" (`r`n  echo レビュー依頼を検出。Codex を起動します...`r`n  codex -a never -s danger-full-access `"$codexPrompt`"`r`n  del `".claude-peers\reviewer\task.txt`" 2>nul`r`n  echo レビュー完了。待機に戻ります...`r`n)`r`ntimeout /t 5 /nobreak >nul`r`ngoto loop"
+Write-Utf8NoBom (Join-Path $reviewerDir "start.cmd") $startCmd
+
+# --- Claude Worker 用ディレクトリ（事前起動分のみ） ---
+if ($workers -gt 0) {
+  $workerConfig = @{
+    mcpServers = @{
+      "claude-peers" = @{
+        command = $tsxPath
+        args = @($channelScriptEscaped, "--role", "worker", "--namespace", $project, "--broker", $brokerUrl, "--mode", $mode)
       }
-    } | ConvertTo-Json -Depth 5
-
-    for ($i = 1; $i -le $workers; $i++) {
-      $workerIDir = Join-Path $claudePeersDir "worker-$i"
-      New-Item -ItemType Directory -Force -Path $workerIDir | Out-Null
-      Write-Utf8NoBom (Join-Path $workerIDir ".mcp.json") $workerConfig
     }
+  } | ConvertTo-Json -Depth 5
+
+  for ($i = 1; $i -le $workers; $i++) {
+    $workerIDir = Join-Path $claudePeersDir "worker-$i"
+    New-Item -ItemType Directory -Force -Path $workerIDir | Out-Null
+    Write-Utf8NoBom (Join-Path $workerIDir ".mcp.json") $workerConfig
   }
 }
 
-Write-Host "  .mcp.json を生成しました" -ForegroundColor Green
+Write-Host "  設定ファイルを生成しました" -ForegroundColor Green
 
 # 権限設定を生成（全ツール許可 → 確認プロンプトを抑制）
 $settingsJson = @{
@@ -151,12 +162,9 @@ $settingsJson = @{
   enableAllProjectMcpServers = $true
 } | ConvertTo-Json -Depth 5
 
-# Dispatcher は常に Claude → .claude/settings.json を生成
+# Dispatcher + Claude Worker に .claude/settings.json を生成（Codex は不要）
 $roles = @("dispatcher")
-# Claude Worker のみ .claude/settings.json が必要（Codex は不要）
-if ($workerEngine -ne "codex") {
-  for ($i = 1; $i -le $workers; $i++) { $roles += "worker-$i" }
-}
+for ($i = 1; $i -le $workers; $i++) { $roles += "worker-$i" }
 foreach ($role in $roles) {
   $settingsDir = Join-Path (Join-Path $claudePeersDir $role) ".claude"
   New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
@@ -174,13 +182,11 @@ if (Test-Path $gitignorePath) {
   }
 }
 if ($needsAppend) {
-  Add-Content -Path $gitignorePath -Value "`n.claude-peers/"
+  Add-Content -Path $gitignorePath -Value "`n.claude-peers/`n.codex/`nAGENTS.md"
   Write-Host "  .gitignore に .claude-peers/ を追記しました" -ForegroundColor Green
 }
 
-# Step 3: Windows Terminal でタブ起動
-$dispatcherDir = Join-Path $claudePeersDir "dispatcher"
-
+# Step 3: Windows Terminal でセッション起動
 Write-Host ""
 Write-Host "Windows Terminal でセッションを起動中..." -ForegroundColor Yellow
 
@@ -189,58 +195,10 @@ if (-not (Get-Command wt -ErrorAction SilentlyContinue)) {
   exit 1
 }
 
-# Build Windows Terminal command line
 $claudeCmd = "claude --dangerously-load-development-channels server:claude-peers"
-if ($workerEngine -eq "codex") {
-  $tsxPathForCodex = $tsxPath -replace '\\', '/'
-  $workerCmd = "codex --full-auto" `
-    + " -c `"mcp_servers.claude-peers.command=\`"$tsxPathForCodex\`"`"" `
-    + " -c `"mcp_servers.claude-peers.args=[\`"$channelScriptEscaped\`", \`"--role\`", \`"worker\`", \`"--namespace\`", \`"$project\`", \`"--broker\`", \`"$brokerUrl\`", \`"--mode\`", \`"$mode\`"]\`"" `
-    + ' "check_messages() を呼んでタスクを受け取ってください"'
-} else {
-  $workerCmd = $claudeCmd
-}
 
-if ($workers -eq 0) {
-  # Dispatcher のみ起動（Workerは動的にspawn）
-  $wtCmd = "new-tab --title `"Dispatcher`" --tabColor #808080 --startingDirectory `"$dispatcherDir`" cmd /k $claudeCmd"
-} elseif (-not $tabs) {
-  # 分割表示モード: 2x2 グリッドレイアウト
-  #   1 worker:  [D | W1]
-  #   2 workers: [D | W1] / [W2 |   ]
-  #   3 workers: [D | W1] / [W2 | W3]
-  $wtCmd = "new-tab --title `"Dispatcher`" --tabColor #808080 --startingDirectory `"$dispatcherDir`" cmd /k $claudeCmd"
-
-  for ($i = 1; $i -le $workers; $i++) {
-    $workerIDir = Join-Path $claudePeersDir "worker-$i"
-    $workerPane = "--title `"Worker-$i`" --startingDirectory `"$workerIDir`" cmd /k $workerCmd"
-    switch ($i) {
-      1 {
-        # D | W1 (vertical split, 50/50)
-        $wtCmd += " `; split-pane --vertical --size 0.5 $workerPane"
-      }
-      2 {
-        # Focus D (left), split horizontally → W2 below D
-        $wtCmd += " `; move-focus --direction left `; split-pane --horizontal --size 0.5 $workerPane"
-      }
-      3 {
-        # Focus W1 (right), split horizontally → W3 below W1 → 2x2 grid
-        $wtCmd += " `; move-focus --direction right `; split-pane --horizontal --size 0.5 $workerPane"
-      }
-      default {
-        $wtCmd += " `; split-pane --horizontal --size 0.5 $workerPane"
-      }
-    }
-  }
-} else {
-  # タブ表示モード（デフォルト）: Dispatcher はタブ色で区別
-  $wtCmd = "new-tab --title `"Dispatcher`" --tabColor #808080 --startingDirectory `"$dispatcherDir`" cmd /k $claudeCmd"
-
-  for ($i = 1; $i -le $workers; $i++) {
-    $workerIDir = Join-Path $claudePeersDir "worker-$i"
-    $wtCmd += " `; new-tab --title `"Worker-$i`" --startingDirectory `"$workerIDir`" cmd /k $workerCmd"
-  }
-}
+# レイアウト: Dispatcher のみ起動。Reviewer + Workers は Broker が一括スポーン時に追加
+$wtCmd = "new-tab --title `"Dispatcher`" --tabColor #808080 --startingDirectory `"$dispatcherDir`" cmd /k $claudeCmd"
 
 try {
   Start-Process wt -ArgumentList $wtCmd -ErrorAction Stop
@@ -253,11 +211,7 @@ Write-Host ""
 Write-Host "========================================" -ForegroundColor Green
 Write-Host " claude-peers 起動完了！" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Green
-if ($workers -eq 0) {
-  Write-Host "  Dispatcher x 1（Worker は動的に起動されます）" -ForegroundColor White
-} else {
-  Write-Host "  Dispatcher x 1 + Worker x $workers" -ForegroundColor White
-}
+Write-Host "  Dispatcher x 1（Reviewer + Worker は動的に起動）" -ForegroundColor White
 Write-Host "  プロジェクト: $project" -ForegroundColor White
 Write-Host "  モード: $mode" -ForegroundColor White
 Write-Host ""

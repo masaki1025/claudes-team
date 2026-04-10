@@ -111,16 +111,11 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "spawn_worker",
-    description: "新しいWorkerを起動する（Dispatcher専用）。タスク分解後に必要なWorker数だけ呼び出す。",
+    description: "新しいClaude Workerを起動する（Dispatcher専用）。Codex Reviewerは常駐のためスポーン不要。",
     inputSchema: {
       type: "object" as const,
       properties: {
         reason: { type: "string", description: "Workerが必要な理由（ログ用）" },
-        engine: {
-          type: "string",
-          enum: ["claude", "codex"],
-          description: "WorkerのCLIエンジン（デフォルト: claude）",
-        },
       },
       required: ["reason"],
     },
