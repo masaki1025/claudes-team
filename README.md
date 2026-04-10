@@ -71,16 +71,16 @@ claude`s team/
 
 ```powershell
 # PowerShell から
-.\start-peers.ps1                         # デフォルト: Dispatcherのみ起動, Worker は動的
-.\start-peers.ps1 -workers 3              # Worker 3体を事前起動
-.\start-peers.ps1 -workers 2 -split       # 事前起動 + 分割表示
+.\start-peers.ps1                         # デフォルト: Dispatcherのみ起動, Worker は動的, 分割表示
+.\start-peers.ps1 -workers 3              # Worker 3体を事前起動（分割表示）
+.\start-peers.ps1 -workers 3 -tabs        # Worker 3体を事前起動（タブ表示）
 .\start-peers.ps1 -mode FULL_AUTO         # 完全自律モード
 .\start-peers.ps1 -project my-app         # namespace を明示
 .\start-peers.ps1 -clean                  # 前回のセッション状態をリセットして起動
 
 # cmd から
 claude-peers.cmd -project my-app
-claude-peers.cmd -project my-app -workers 2 -split
+claude-peers.cmd -project my-app -workers 3
 ```
 
 ## 自律性モード

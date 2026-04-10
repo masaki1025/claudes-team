@@ -4,19 +4,17 @@
 
 | ツール | 必要バージョン | 用途 |
 |---|---|---|
-| Claude Code | v2.1.80 以上 | エージェントセッション |
+| Claude Code | v2.1.80 以上 | エージェントセッション（claude.ai ログイン必須） |
 | Node.js | v18 以上 | チャネルサーバー実行（tsx経由） |
 | uv | v0.10 以上 | Python 仮想環境・パッケージ管理 |
-| Windows Terminal | - | 複数タブ管理 |
-
-> Bun は不要です。チャネルサーバーは tsx（Node.js）で実行します。
+| Windows Terminal | - | セッション表示（分割ペイン / タブ） |
 
 ---
 
 ## プロジェクト構成
 
 ```
-claude`s team/
+claude-peers/
   broker/                        ブローカーデーモン（Python / FastAPI）
     broker.py                      メインアプリ（localhost:7799）
     database.py                    SQLite 操作
@@ -34,11 +32,6 @@ claude`s team/
     dispatcher.md                  Dispatcher 用
     worker.md                      Worker 用
   specs/                         設計仕様書
-    claude-peers-requirements-v7.md
-    broker-api-design.md
-    channel-server-design.md
-    start-peers-design.md
-    implementation-guide.md
   docs/                          アーキテクチャ解説
   setup.ps1                      環境構築スクリプト
   start-peers.ps1                起動スクリプト
@@ -50,16 +43,16 @@ claude`s team/
 ### ランタイムで生成されるファイル（git管理外）
 
 ```
-~/.claude-peers/                 システムプロンプト・ログ
+~/.claude-peers/                 システムプロンプト
   dispatcher.md                    setup.ps1 が prompts/ からコピー
   worker.md                        setup.ps1 が prompts/ からコピー
   logs/sessions/                   セッションログ
 
-<対象プロジェクト>/.claude-peers/  MCP設定（start-peers.ps1 / Broker が生成）
+<対象プロジェクト>/.claude-peers/  セッション設定（起動時に自動生成）
   dispatcher/.mcp.json             Dispatcher用 MCP設定
   dispatcher/.claude/settings.json 権限設定（全ツール許可）
-  worker-1/.mcp.json               Worker用 MCP設定（動的生成も可）
-  worker-1/.claude/settings.json   権限設定
+  worker-N/.mcp.json               Worker用 MCP設定（動的生成）
+  worker-N/.claude/settings.json   権限設定
   .broker.pid                      ブローカーのPID
 ```
 
@@ -70,11 +63,13 @@ claude`s team/
 ### 1. リポジトリのクローン
 
 ```powershell
-git clone https://github.com/masaki1025/claudes-team.git "claude`s team"
-cd "claude`s team"
+git clone https://github.com/masaki1025/claudes-team.git "claude-peers"
+cd "claude-peers"
 ```
 
-### 2. 環境構築（一発）
+インストール先はどこでもOK。パスは自動解決されます。
+
+### 2. 環境構築
 
 ```powershell
 .\setup.ps1
@@ -83,39 +78,39 @@ cd "claude`s team"
 以下が自動で実行されます:
 
 1. **前提チェック** -- uv, node, npm の存在確認 + Node.js バージョン検証（v18以上）
-2. **ブローカー依存** -- `uv venv` + `uv pip install -r broker/requirements.txt`
-   - fastapi, uvicorn, aiosqlite, httpx, pydantic
-3. **チャネルサーバー依存** -- `npm install`（channel/）
-   - @modelcontextprotocol/sdk, tsx, typescript
+2. **ブローカー依存** -- `uv venv` + `uv pip install`（fastapi, uvicorn, aiosqlite, httpx）
+3. **チャネルサーバー依存** -- `npm install`（@modelcontextprotocol/sdk, tsx）
 4. **システムプロンプト配置** -- `prompts/` から `~/.claude-peers/` にコピー
 
 ---
 
 ## 起動方法
 
-### 通常起動（Dispatcher のみ、Worker は動的）
+### 基本の使い方
+
+対象プロジェクトのディレクトリで実行します。
 
 ```powershell
-# PowerShell
+# cmd から（推奨）
 cd C:\path\to\your-project
-C:\path\to\claude`s team\start-peers.ps1 -project my-app
+C:\path\to\claude-peers\claude-peers.cmd
 
-# cmd
+# PowerShell から
 cd C:\path\to\your-project
-C:\path\to\claude`s team\claude-peers.cmd -project my-app
+C:\path\to\claude-peers\start-peers.ps1
 ```
 
-Dispatcher がゴールを受け取ると、タスクを分解し、必要な Worker 数を判断して `spawn_worker()` で自動起動します。
+Dispatcher が起動し、ゴールを伝えると Worker を自動起動して 2x2 グリッドの分割表示で作業を開始します。
 
-### オプション指定
+### 起動オプション
 
 ```powershell
-.\start-peers.ps1                          # デフォルト: Dispatcherのみ, HYBRID
-.\start-peers.ps1 -workers 3              # Worker 3体を事前起動
-.\start-peers.ps1 -workers 2 -split       # 事前起動 + 分割表示
+.\start-peers.ps1                         # デフォルト: Dispatcherのみ, Worker は動的起動
+.\start-peers.ps1 -workers 3              # Worker 3体を事前起動（分割表示）
+.\start-peers.ps1 -workers 3 -tabs        # Worker 3体を事前起動（タブ表示）
 .\start-peers.ps1 -mode FULL_AUTO         # 完全自律モードで起動
-.\start-peers.ps1 -project my-app         # プロジェクト名を明示
-.\start-peers.ps1 -clean                  # 前回のセッション状態をリセット
+.\start-peers.ps1 -project my-app         # namespace を明示
+.\start-peers.ps1 -clean                  # 前回のセッション状態をリセットして起動
 ```
 
 | オプション | デフォルト | 説明 |
@@ -123,62 +118,114 @@ Dispatcher がゴールを受け取ると、タスクを分解し、必要な Wo
 | `-project` | カレントフォルダ名 | namespace（プロジェクト識別子） |
 | `-workers` | 0 | 事前起動する Worker 数。0 なら Dispatcher が動的に決定 |
 | `-mode` | HYBRID | 自律性モード（MANUAL / HYBRID / FULL_AUTO） |
-| `-split` | なし | 事前起動 Worker をペイン分割表示 |
+| `-tabs` | なし | タブ表示に切替（デフォルトは分割表示） |
 | `-clean` | なし | 前回のセッション状態を削除して起動 |
+
+### 表示モード
+
+**分割表示（デフォルト）** -- 1つのタブ内で 2x2 グリッド表示。全 Worker の状況を同時に確認できます。
+
+```
+Dispatcher | Worker-1
+-----------+---------
+Worker-2   | Worker-3
+```
+
+Worker 4以降は新規タブに配置されます。
+
+**タブ表示（`-tabs`）** -- 各セッションが別タブ。画面が狭い場合に推奨。
+
+### 動的スポーン（Worker 数を指定しない場合）
+
+`-workers` を指定しないと、Dispatcher がタスクを分解した後に必要な Worker 数を判断して `spawn_worker()` で自動起動します。
+
+- 複数の spawn リクエストは **バッチ処理**（3秒間まとめて1コマンドで一括起動）
+- Worker の起動完了まで **15〜20秒**かかります
+- Dispatcher は `list_peers()` で全員の起動を確認してからタスクをアサインします
 
 ### 起動時に自動で行われること
 
 1. ブローカーデーモンがバックグラウンドで起動（localhost:7799）
 2. ヘルスチェックで起動確認（最大5回リトライ）
 3. プロジェクトフォルダに `.claude-peers/` が生成される
-   - `dispatcher/.mcp.json` -- Dispatcher用 MCP設定
-   - `dispatcher/.claude/settings.json` -- 権限設定（全ツール許可）
-   - Worker 指定時は `worker-N/` も生成
 4. `.gitignore` に `.claude-peers/` が追記される（初回のみ）
-5. Windows Terminal で Dispatcher（+ 事前起動 Worker）のタブが開く
-6. 各セッションが `--resume --dangerously-load-development-channels server:claude-peers` で起動
-7. 各チャネルサーバーが指定された `--mode` でブローカーに登録
+5. Windows Terminal で Dispatcher（+ 事前起動 Worker）が開く
+6. 各セッションがチャネルサーバー経由でブローカーに登録
 
-### セッションの再開
+---
+
+## 停止方法
+
+```powershell
+# cmd から
+C:\path\to\claude-peers\stop-peers.cmd
+
+# PowerShell から
+C:\path\to\claude-peers\stop-peers.ps1
+```
+
+停止時の処理:
+1. ブローカーに `/shutdown` を送信（全セッションに停止通知）
+2. ブローカープロセスを強制終了
+3. `.claude-peers/` を削除
+4. Windows Terminal の各ペイン/タブは手動で閉じてください
+
+---
+
+## セッションの再開
 
 CLI が落ちても `-clean` を付けずに再起動すれば、`--resume` により前回の会話を引き継ぎます。
 
 ```powershell
 # 前回の状態を引き継いで再開
-.\start-peers.ps1 -project my-app
+.\start-peers.ps1
 
 # 新しいタスクを始める場合はリセット
-.\start-peers.ps1 -project my-app -clean
+.\start-peers.ps1 -clean
 ```
-
-### 停止
-
-```powershell
-# PowerShell
-.\stop-peers.ps1
-
-# cmd
-C:\path\to\claude`s team\stop-peers.cmd
-```
-
-停止時の処理:
-1. ブローカーに `/shutdown` を送信（全セッションに通知）
-2. ブローカープロセスを強制終了
-3. `.claude-peers/` を削除
-4. Windows Terminal の各タブは手動で閉じる
 
 ---
 
-## ブランチ運用
+## 自律性モード
+
+| モード | 動作 | 人間の関与 |
+|---|---|---|
+| MANUAL | 全ステップで承認を待つ | 高 |
+| HYBRID | タスク分解を提案→承認後に自動実行 | 中（デフォルト） |
+| FULL_AUTO | ゴールから結果まで完全自律 | 低 |
+
+Dispatcher にゴールを伝える際に「FULL_AUTOで」「手動で確認したい」と言えばモードを切り替えます。
+
+---
+
+## 効果的な使い方
+
+### 基盤先行パターン（推奨）
+
+1. Dispatcher にゴールを伝える
+2. Dispatcher がまず基盤（DB、モデル、認証等）を自分で作りテストを通す
+3. 基盤が安定してから Worker を起動し、具体的な実装を並列でアサイン
+
+これにより統合エラーを大幅に減らせます（実測で統合エラーゼロを達成）。
+
+### Dispatcher への指示のコツ
+
+- **使用ライブラリを明記**: 「FastAPI + SQLAlchemy で」「テストは pytest + TestClient で」
+- **API 契約を共有**: Worker 間で同じエンドポイントパス・スキーマを使うよう指示
+- **ファイル担当を分離**: Worker ごとに触るファイルを完全に分ける
+
+---
+
+## プロンプトのカスタマイズ
+
+Dispatcher と Worker の振る舞いはシステムプロンプトで制御されています。
 
 ```
-main        ← 人間が手動でマージ（本番相当）
-  develop     ← 開発ブランチ
-    feature/xxx  ← 機能ブランチ（ここで作業）
+~/.claude-peers/dispatcher.md    Dispatcher 用
+~/.claude-peers/worker.md        Worker 用
 ```
 
-- 機能開発: `develop` から `feature/xxx` を切って作業 → `develop` にマージ
-- `main` へのマージは人間が手動で行う
+これらを直接編集すればカスタマイズできます。`setup.ps1` を再実行するとソース（`prompts/`）で上書きされるので注意してください。
 
 ---
 
@@ -186,11 +233,13 @@ main        ← 人間が手動でマージ（本番相当）
 
 | 症状 | 確認箇所 |
 |---|---|
-| `setup.ps1` でエラー | uv, node, npm がPATHにあるか。Node.js v18以上か |
-| ブローカーが起動しない | `broker/.venv/` が存在するか。`.\setup.ps1` を再実行 |
-| チャネルサーバーが接続できない | `.claude-peers/{role}/.mcp.json` のパスが正しいか |
-| メッセージが届かない | ブローカーの `channel_url` が正しいか（ポート番号） |
-| ロックが解放されない | ハートビートタイムアウト（60秒）を待つ |
-| Claude Code がチャネルを認識しない | v2.1.80以上か。claude.ai にログイン済みか |
-| Windows Terminal が起動しない | `wt` コマンドがPATHにあるか |
-| `tsx` が見つからない | `cd channel && npm install` を再実行 |
+| `setup.ps1` でエラー | uv, node, npm が PATH にあるか。Node.js v18 以上か |
+| ブローカーが起動しない | `broker/.venv/` が存在するか。`setup.ps1` を再実行 |
+| Worker が起動しない | 15〜20秒待ったか。`list_peers()` で確認 |
+| 全 Worker が同じ番号になる | broker を最新版に更新（バッチスポーン採番修正） |
+| 過去メッセージが大量に流れる | `-clean` を付けて起動。broker DB がリセットされる |
+| レイアウトが崩れる | `-clean` で再起動。Worker 4以上はタブにフォールバック |
+| メッセージが届かない | ブローカーログで `channel_url` を確認（ポート番号） |
+| ロックが解放されない | ハートビートタイムアウト（60秒）で自動解放 |
+| Claude Code がチャネルを認識しない | v2.1.80 以上か。claude.ai にログイン済みか |
+| Windows Terminal が起動しない | `wt` コマンドが PATH にあるか |
