@@ -116,6 +116,11 @@ export const TOOLS: Tool[] = [
       type: "object" as const,
       properties: {
         reason: { type: "string", description: "Workerが必要な理由（ログ用）" },
+        engine: {
+          type: "string",
+          enum: ["claude", "codex"],
+          description: "WorkerのCLIエンジン（デフォルト: claude）",
+        },
       },
       required: ["reason"],
     },

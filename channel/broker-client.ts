@@ -170,13 +170,14 @@ export class BrokerClient {
 
   // --- Worker spawning ---
 
-  async spawnWorker(reason: string): Promise<{ worker_id: string }> {
+  async spawnWorker(reason: string, engine?: string): Promise<{ worker_id: string }> {
     const sid = this.requireSession();
     return this.request("/spawn", {
       method: "POST",
       body: JSON.stringify({
         namespace: this.namespace,
         requested_by: sid,
+        engine: engine || "claude",
       }),
     });
   }

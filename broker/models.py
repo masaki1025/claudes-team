@@ -45,3 +45,4 @@ class LockRequest(BaseModel):
 class SpawnRequest(BaseModel):
     namespace: str
     requested_by: str
+    engine: str = "claude"  # "claude" | "codex"

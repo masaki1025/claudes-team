@@ -168,12 +168,33 @@ Worker3（Tester）: TASK-005 待機中（TASK-003依存）
 6. `list_peers()`で全員の起動を確認してからタスクをアサインする。全員揃っていなければ10秒待って再確認する
 
 ```
-# 例: 3つの並列タスクがある場合
+# 例: 3つの並列タスクがある場合（全てClaude Worker）
 spawn_worker("Backend担当")
 spawn_worker("Frontend担当")
 spawn_worker("Tester担当")
 # → 20秒待ってから list_peers() で確認。揃ってなければ10秒後に再確認
 ```
+
+### エンジン指定（Claude / Codex）
+WorkerのCLIエンジンを指定できます。デフォルトは`claude`です。
+
+```
+# Claude Worker（デフォルト、push通知あり・即座にメッセージ受信）
+spawn_worker(reason="Backend担当")
+
+# Codex Worker（ポーリング型、タスク受信に数秒〜30秒のラグ）
+spawn_worker(reason="Frontend担当", engine="codex")
+```
+
+**Codex Workerの特性：**
+- push通知を受信できないため、`check_messages()` でタスクを受け取る
+- タスク受信にラグがあるが、完了報告の `reply()` は即座に届く
+- ファイルロック、ステータス更新などの MCP ツールは Claude Worker と同一
+- 混成チーム（Claude + Codex）は正常に動作する
+
+**推奨：**
+- 頻繁にやり取りが必要なタスクは Claude Worker に割り当てる
+- 独立した長時間タスクは Codex Worker でも問題ない
 
 ### ロール割り当て
 

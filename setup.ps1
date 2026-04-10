@@ -79,6 +79,10 @@ if (-not (Test-Path $dispatcherSrc) -or -not (Test-Path $workerSrc)) {
 
 Copy-Item $dispatcherSrc (Join-Path $claudePeersHome "dispatcher.md") -Force
 Copy-Item $workerSrc (Join-Path $claudePeersHome "worker.md") -Force
+$codexAddendumSrc = Join-Path $promptsDir "worker-codex-addendum.md"
+if (Test-Path $codexAddendumSrc) {
+  Copy-Item $codexAddendumSrc (Join-Path $claudePeersHome "worker-codex-addendum.md") -Force
+}
 Write-Host "  完了" -ForegroundColor Green
 
 Write-Host ""

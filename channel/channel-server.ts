@@ -165,9 +165,9 @@ async function main() {
         }
 
         case "spawn_worker": {
-          const { reason } = args as { reason: string };
-          const result = await broker.spawnWorker(reason);
-          return text(`${result.worker_id} を起動しました（理由: ${reason}）。起動完了まで10〜15秒かかります。list_peers()で確認してください。`);
+          const { reason, engine } = args as { reason: string; engine?: string };
+          const result = await broker.spawnWorker(reason, engine);
+          return text(`${result.worker_id} を起動しました（engine: ${engine || "claude"}, 理由: ${reason}）。起動完了まで10〜15秒かかります。list_peers()で確認してください。`);
         }
 
         default:

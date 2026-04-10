@@ -51,6 +51,7 @@ _spawn_config = {
     "max_workers": 8,
     "split": False,
     "permissions": ["Bash", "Edit", "Write", "Read", "Glob", "Grep", "WebFetch", "mcp__claude-peers"],
+    "codex_path": "codex",
 }
 
 # Spawn batch queue — collect spawn requests and launch as a single wt command
@@ -460,7 +461,28 @@ def _build_wt_command(workers: list[dict], split: bool) -> str:
     parts: list[str] = []
 
     for w in workers:
-        pane_cmd = f'--title "{w["name"]}" --startingDirectory "{w["dir"]}" cmd /k {claude_cmd}'
+        if w.get("engine") == "codex":
+            codex_path = _spawn_config["codex_path"]
+            channel_script = _spawn_config["channel_script"].replace("\\", "/")
+            tsx_path = _spawn_config["tsx_path"].replace("\\", "/")
+            ns = w.get("namespace", "default")
+            port = _spawn_config.get("port", 7799)
+            mode = _spawn_config["mode"]
+            args_toml = ", ".join(f'"{a}"' for a in [
+                channel_script, "--role", "worker",
+                "--namespace", ns,
+                "--broker", f"http://127.0.0.1:{port}",
+                "--mode", mode,
+            ])
+            cli_cmd = (
+                f'{codex_path} --full-auto'
+                f' -c "mcp_servers.claude-peers.command=\\"{tsx_path}\\""'
+                f' -c "mcp_servers.claude-peers.args=[{args_toml}]"'
+                f' "check_messages() を呼んでタスクを受け取ってください"'
+            )
+        else:
+            cli_cmd = claude_cmd
+        pane_cmd = f'--title "{w["name"]}" --startingDirectory "{w["dir"]}" cmd /k {cli_cmd}'
 
         if not split or w["num"] > 3:
             parts.append(f"new-tab {pane_cmd}")
@@ -533,33 +555,60 @@ async def spawn_worker(req: SpawnRequest):
     claude_peers_dir = Path(project_dir) / ".claude-peers"
     worker_dir = claude_peers_dir / worker_name
 
-    # Create worker directory with .mcp.json
+    # Create worker directory and engine-specific config
     worker_dir.mkdir(parents=True, exist_ok=True)
     channel_script = _spawn_config["channel_script"].replace("\\", "/")
-    mcp_config = {
-        "mcpServers": {
-            "claude-peers": {
-                "command": _spawn_config["tsx_path"],
-                "args": [
-                    channel_script,
-                    "--role", "worker",
-                    "--namespace", req.namespace,
-                    "--broker", f"http://127.0.0.1:{app.state.port}",
-                    "--mode", _spawn_config["mode"],
-                ],
+    tsx_path = _spawn_config["tsx_path"].replace("\\", "/")
+    mcp_args = [
+        channel_script,
+        "--role", "worker",
+        "--namespace", req.namespace,
+        "--broker", f"http://127.0.0.1:{app.state.port}",
+        "--mode", _spawn_config["mode"],
+    ]
+
+    if req.engine == "codex":
+        # Codex: .codex/config.toml + AGENTS.md
+        codex_dir = worker_dir / ".codex"
+        codex_dir.mkdir(parents=True, exist_ok=True)
+        args_toml = ", ".join(f'"{a}"' for a in mcp_args)
+        toml_content = (
+            "[mcp_servers.claude-peers]\n"
+            f'command = "{tsx_path}"\n'
+            f"args = [{args_toml}]\n"
+        )
+        (codex_dir / "config.toml").write_text(toml_content, encoding="utf-8")
+
+        # Generate AGENTS.md from worker.md + codex addendum
+        claude_peers_home = Path.home() / ".claude-peers"
+        worker_md = ""
+        addendum_md = ""
+        worker_md_path = claude_peers_home / "worker.md"
+        addendum_path = claude_peers_home / "worker-codex-addendum.md"
+        if worker_md_path.exists():
+            worker_md = worker_md_path.read_text(encoding="utf-8")
+        if addendum_path.exists():
+            addendum_md = addendum_path.read_text(encoding="utf-8")
+        (worker_dir / "AGENTS.md").write_text(worker_md + "\n" + addendum_md, encoding="utf-8")
+    else:
+        # Claude: .mcp.json + .claude/settings.json
+        mcp_config = {
+            "mcpServers": {
+                "claude-peers": {
+                    "command": _spawn_config["tsx_path"],
+                    "args": mcp_args,
+                }
             }
         }
-    }
-    (worker_dir / ".mcp.json").write_text(json.dumps(mcp_config, indent=2), encoding="utf-8")
+        (worker_dir / ".mcp.json").write_text(json.dumps(mcp_config, indent=2), encoding="utf-8")
 
-    # Create .claude/settings.json
-    settings_dir = worker_dir / ".claude"
-    settings_dir.mkdir(parents=True, exist_ok=True)
-    settings = {
-        "permissions": {"allow": _spawn_config["permissions"]},
-        "enableAllProjectMcpServers": True,
-    }
-    (settings_dir / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        settings_dir = worker_dir / ".claude"
+        settings_dir.mkdir(parents=True, exist_ok=True)
+        settings = {
+            "permissions": {"allow": _spawn_config["permissions"]},
+            "enableAllProjectMcpServers": True,
+        }
+        (settings_dir / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
 
     # Queue for batch launch (single wt command for reliable pane layout)
     global _spawn_timer
@@ -567,6 +616,8 @@ async def spawn_worker(req: SpawnRequest):
         "name": worker_name,
         "dir": str(worker_dir),
         "num": next_num,
+        "engine": req.engine,
+        "namespace": req.namespace,
     })
 
     # Reset batch timer — flush after SPAWN_BATCH_DELAY seconds of no new requests
@@ -592,6 +643,7 @@ if __name__ == "__main__":
     parser.add_argument("--mode", type=str, default="HYBRID", help="Autonomy mode")
     parser.add_argument("--max-workers", type=int, default=8, help="Maximum number of workers")
     parser.add_argument("--split", action="store_true", help="Use split panes instead of tabs for spawned workers")
+    parser.add_argument("--codex-path", type=str, default="codex", help="Path to codex CLI")
     args = parser.parse_args()
 
     # Store spawn configuration
@@ -601,8 +653,10 @@ if __name__ == "__main__":
     _spawn_config["mode"] = args.mode
     _spawn_config["max_workers"] = args.max_workers
     _spawn_config["split"] = args.split
+    _spawn_config["codex_path"] = args.codex_path
 
     # Store port in app state for spawn endpoint
     app.state.port = args.port
+    _spawn_config["port"] = args.port
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

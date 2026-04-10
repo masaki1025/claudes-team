@@ -2,6 +2,7 @@
   [string]$project = (Split-Path -Leaf (Get-Location)),
   [int]$workers = 0,
   [string]$mode = "HYBRID",
+  [string]$workerEngine = "claude",
   [switch]$tabs,
   [switch]$clean
 )
@@ -22,6 +23,7 @@ Write-Host "claude-peers を起動します..." -ForegroundColor Cyan
 Write-Host "  プロジェクト : $project" -ForegroundColor Cyan
 Write-Host "  Worker数     : $(if ($workers -eq 0) { '動的（Dispatcherが決定）' } else { $workers })" -ForegroundColor Cyan
 Write-Host "  モード       : $mode" -ForegroundColor Cyan
+Write-Host "  Workerエンジン: $workerEngine" -ForegroundColor Cyan
 Write-Host "  表示         : $(if ($tabs) { 'タブ表示' } else { '分割表示' })" -ForegroundColor Cyan
 Write-Host ""
 
@@ -32,7 +34,8 @@ $brokerArgs = @("broker.py", "--port", "7799",
   "--project-dir", $projectDir,
   "--channel-script", $channelScript,
   "--tsx-path", $tsxPath,
-  "--mode", $mode)
+  "--mode", $mode,
+  "--codex-path", "codex")
 if (-not $tabs) { $brokerArgs += "--split" }
 $brokerProcess = Start-Process -FilePath $pythonPath `
   -ArgumentList $brokerArgs `
@@ -92,19 +95,49 @@ Write-Utf8NoBom (Join-Path (Join-Path $claudePeersDir "dispatcher") ".mcp.json")
 
 # Worker用ディレクトリ（事前起動分のみ。workers=0なら動的にBrokerが生成）
 if ($workers -gt 0) {
-  $workerConfig = @{
-    mcpServers = @{
-      "claude-peers" = @{
-        command = $tsxPath
-        args = @($channelScriptEscaped, "--role", "worker", "--namespace", $project, "--broker", $brokerUrl, "--mode", $mode)
-      }
-    }
-  } | ConvertTo-Json -Depth 5
+  if ($workerEngine -eq "codex") {
+    # Codex: .codex/config.toml + AGENTS.md
+    $tsxPathEscaped = $tsxPath -replace '\\', '/'
+    $workerToml = @"
+[mcp_servers.claude-peers]
+command = "$tsxPathEscaped"
+args = ["$channelScriptEscaped", "--role", "worker", "--namespace", "$project", "--broker", "$brokerUrl", "--mode", "$mode"]
+"@
 
-  for ($i = 1; $i -le $workers; $i++) {
-    $workerIDir = Join-Path $claudePeersDir "worker-$i"
-    New-Item -ItemType Directory -Force -Path $workerIDir | Out-Null
-    Write-Utf8NoBom (Join-Path $workerIDir ".mcp.json") $workerConfig
+    # Read worker.md + codex addendum for AGENTS.md
+    $claudePeersHome = Join-Path $HOME ".claude-peers"
+    $workerMd = ""
+    $codexAddendum = ""
+    $workerMdPath = Join-Path $claudePeersHome "worker.md"
+    $addendumPath = Join-Path $claudePeersHome "worker-codex-addendum.md"
+    if (Test-Path $workerMdPath) { $workerMd = Get-Content $workerMdPath -Raw -Encoding UTF8 }
+    if (Test-Path $addendumPath) { $codexAddendum = Get-Content $addendumPath -Raw -Encoding UTF8 }
+    $agentsMd = $workerMd + "`n" + $codexAddendum
+
+    for ($i = 1; $i -le $workers; $i++) {
+      $workerIDir = Join-Path $claudePeersDir "worker-$i"
+      New-Item -ItemType Directory -Force -Path $workerIDir | Out-Null
+      $codexDir = Join-Path $workerIDir ".codex"
+      New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
+      Write-Utf8NoBom (Join-Path $codexDir "config.toml") $workerToml
+      Write-Utf8NoBom (Join-Path $workerIDir "AGENTS.md") $agentsMd
+    }
+  } else {
+    # Claude: .mcp.json
+    $workerConfig = @{
+      mcpServers = @{
+        "claude-peers" = @{
+          command = $tsxPath
+          args = @($channelScriptEscaped, "--role", "worker", "--namespace", $project, "--broker", $brokerUrl, "--mode", $mode)
+        }
+      }
+    } | ConvertTo-Json -Depth 5
+
+    for ($i = 1; $i -le $workers; $i++) {
+      $workerIDir = Join-Path $claudePeersDir "worker-$i"
+      New-Item -ItemType Directory -Force -Path $workerIDir | Out-Null
+      Write-Utf8NoBom (Join-Path $workerIDir ".mcp.json") $workerConfig
+    }
   }
 }
 
@@ -118,8 +151,12 @@ $settingsJson = @{
   enableAllProjectMcpServers = $true
 } | ConvertTo-Json -Depth 5
 
+# Dispatcher は常に Claude → .claude/settings.json を生成
 $roles = @("dispatcher")
-for ($i = 1; $i -le $workers; $i++) { $roles += "worker-$i" }
+# Claude Worker のみ .claude/settings.json が必要（Codex は不要）
+if ($workerEngine -ne "codex") {
+  for ($i = 1; $i -le $workers; $i++) { $roles += "worker-$i" }
+}
 foreach ($role in $roles) {
   $settingsDir = Join-Path (Join-Path $claudePeersDir $role) ".claude"
   New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
@@ -154,6 +191,15 @@ if (-not (Get-Command wt -ErrorAction SilentlyContinue)) {
 
 # Build Windows Terminal command line
 $claudeCmd = "claude --dangerously-load-development-channels server:claude-peers"
+if ($workerEngine -eq "codex") {
+  $tsxPathForCodex = $tsxPath -replace '\\', '/'
+  $workerCmd = "codex --full-auto" `
+    + " -c `"mcp_servers.claude-peers.command=\`"$tsxPathForCodex\`"`"" `
+    + " -c `"mcp_servers.claude-peers.args=[\`"$channelScriptEscaped\`", \`"--role\`", \`"worker\`", \`"--namespace\`", \`"$project\`", \`"--broker\`", \`"$brokerUrl\`", \`"--mode\`", \`"$mode\`"]\`"" `
+    + ' "check_messages() を呼んでタスクを受け取ってください"'
+} else {
+  $workerCmd = $claudeCmd
+}
 
 if ($workers -eq 0) {
   # Dispatcher のみ起動（Workerは動的にspawn）
@@ -167,7 +213,7 @@ if ($workers -eq 0) {
 
   for ($i = 1; $i -le $workers; $i++) {
     $workerIDir = Join-Path $claudePeersDir "worker-$i"
-    $workerPane = "--title `"Worker-$i`" --startingDirectory `"$workerIDir`" cmd /k $claudeCmd"
+    $workerPane = "--title `"Worker-$i`" --startingDirectory `"$workerIDir`" cmd /k $workerCmd"
     switch ($i) {
       1 {
         # D | W1 (vertical split, 50/50)
@@ -192,7 +238,7 @@ if ($workers -eq 0) {
 
   for ($i = 1; $i -le $workers; $i++) {
     $workerIDir = Join-Path $claudePeersDir "worker-$i"
-    $wtCmd += " `; new-tab --title `"Worker-$i`" --startingDirectory `"$workerIDir`" cmd /k $claudeCmd"
+    $wtCmd += " `; new-tab --title `"Worker-$i`" --startingDirectory `"$workerIDir`" cmd /k $workerCmd"
   }
 }
 
