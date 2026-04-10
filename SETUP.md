@@ -62,17 +62,17 @@ claude-peers/
 
 ### 1. リポジトリのクローン
 
-```powershell
-git clone https://github.com/masaki1025/claudes-team.git "claude-peers"
-cd "claude-peers"
+```cmd
+git clone https://github.com/masaki1025/claudes-team.git claude-peers
+cd claude-peers
 ```
 
 インストール先はどこでもOK。パスは自動解決されます。
 
 ### 2. 環境構築
 
-```powershell
-.\setup.ps1
+```cmd
+powershell -ExecutionPolicy Bypass -File setup.ps1
 ```
 
 以下が自動で実行されます:
@@ -90,27 +90,22 @@ cd "claude-peers"
 
 対象プロジェクトのディレクトリで実行します。
 
-```powershell
-# cmd から（推奨）
+```cmd
 cd C:\path\to\your-project
 C:\path\to\claude-peers\claude-peers.cmd
-
-# PowerShell から
-cd C:\path\to\your-project
-C:\path\to\claude-peers\start-peers.ps1
 ```
 
 Dispatcher が起動し、ゴールを伝えると Worker を自動起動して 2x2 グリッドの分割表示で作業を開始します。
 
 ### 起動オプション
 
-```powershell
-.\start-peers.ps1                         # デフォルト: Dispatcherのみ, Worker は動的起動
-.\start-peers.ps1 -workers 3              # Worker 3体を事前起動（分割表示）
-.\start-peers.ps1 -workers 3 -tabs        # Worker 3体を事前起動（タブ表示）
-.\start-peers.ps1 -mode FULL_AUTO         # 完全自律モードで起動
-.\start-peers.ps1 -project my-app         # namespace を明示
-.\start-peers.ps1 -clean                  # 前回のセッション状態をリセットして起動
+```cmd
+claude-peers.cmd                          :: デフォルト: Dispatcherのみ, Worker は動的起動
+claude-peers.cmd -workers 3               :: Worker 3体を事前起動（分割表示）
+claude-peers.cmd -workers 3 -tabs         :: Worker 3体を事前起動（タブ表示）
+claude-peers.cmd -mode FULL_AUTO          :: 完全自律モードで起動
+claude-peers.cmd -project my-app          :: namespace を明示
+claude-peers.cmd -clean                   :: 前回のセッション状態をリセットして起動
 ```
 
 | オプション | デフォルト | 説明 |
@@ -156,12 +151,8 @@ Worker 4以降は新規タブに配置されます。
 
 ## 停止方法
 
-```powershell
-# cmd から
+```cmd
 C:\path\to\claude-peers\stop-peers.cmd
-
-# PowerShell から
-C:\path\to\claude-peers\stop-peers.ps1
 ```
 
 停止時の処理:
@@ -176,12 +167,12 @@ C:\path\to\claude-peers\stop-peers.ps1
 
 CLI が落ちても `-clean` を付けずに再起動すれば、`--resume` により前回の会話を引き継ぎます。
 
-```powershell
-# 前回の状態を引き継いで再開
-.\start-peers.ps1
+```cmd
+:: 前回の状態を引き継いで再開
+claude-peers.cmd
 
-# 新しいタスクを始める場合はリセット
-.\start-peers.ps1 -clean
+:: 新しいタスクを始める場合はリセット
+claude-peers.cmd -clean
 ```
 
 ---
