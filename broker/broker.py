@@ -2,12 +2,14 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import signal
-import sys
+import subprocess
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 import uvicorn
@@ -18,9 +20,12 @@ import database as db
 from models import (
     SessionRegister,
     SummaryUpdate,
+    RoleUpdate,
+    ModeUpdate,
     MessageSend,
     BroadcastSend,
     LockRequest,
+    SpawnRequest,
 )
 
 VERSION = "1.0.0"
@@ -35,21 +40,43 @@ logging.basicConfig(
 # Global database connection
 _db = None
 _cleanup_task = None
+_redeliver_task = None
+
+# Spawn configuration (set at startup via CLI args)
+_spawn_config = {
+    "project_dir": None,
+    "channel_script": None,
+    "tsx_path": None,
+    "mode": "HYBRID",
+    "max_workers": 8,
+    "split": False,
+    "permissions": ["Bash", "Edit", "Write", "Read", "Glob", "Grep", "WebFetch", "mcp__claude-peers"],
+}
+
+# Spawn batch queue — collect spawn requests and launch as a single wt command
+_spawn_queue: list[dict] = []
+_spawn_timer: asyncio.Task | None = None
+SPAWN_BATCH_DELAY = 3.0  # seconds to wait before flushing
 
 
 async def get_db():
     return _db
 
 
-async def deliver_to_channel(channel_url: str, payload: dict) -> bool:
-    """Deliver a message to a channel server's /push endpoint."""
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(channel_url, json=payload)
-            return resp.status_code == 200
-    except Exception as e:
-        logger.warning(f"Failed to deliver to {channel_url}: {e}")
-        return False
+async def deliver_to_channel(channel_url: str, payload: dict, retries: int = 3) -> bool:
+    """Deliver a message to a channel server's /push endpoint with retry."""
+    for attempt in range(retries):
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(channel_url, json=payload)
+                if resp.status_code == 200:
+                    return True
+                logger.warning(f"Delivery to {channel_url} returned {resp.status_code} (attempt {attempt + 1}/{retries})")
+        except Exception as e:
+            logger.warning(f"Delivery to {channel_url} failed (attempt {attempt + 1}/{retries}): {e}")
+        if attempt < retries - 1:
+            await asyncio.sleep(1.0 * (attempt + 1))
+    return False
 
 
 async def cleanup_loop():
@@ -64,14 +91,40 @@ async def cleanup_loop():
             logger.error(f"Cleanup error: {e}")
 
 
+async def redeliver_loop():
+    """Periodically retry push delivery for undelivered messages."""
+    while True:
+        await asyncio.sleep(10)
+        try:
+            undelivered = await db.get_undelivered_messages(_db)
+            for msg in undelivered:
+                payload = {
+                    "from_id": msg["from_id"],
+                    "from_role": msg["from_role"],
+                    "content": msg["content"],
+                    "timestamp": msg["timestamp"],
+                }
+                success = await deliver_to_channel(msg["channel_url"], payload, retries=1)
+                if success:
+                    await db.mark_push_delivered(_db, msg["id"])
+                    logger.info(f"Redelivered message {msg['id']} to {msg['to_id']}")
+        except Exception as e:
+            logger.warning(f"Redeliver loop error: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _db, _cleanup_task
+    global _db, _cleanup_task, _redeliver_task
     _db = await init_db(DB_PATH)
+    # Mark all pre-existing messages as delivered to avoid redeliver storm on restart
+    await _db.execute("UPDATE messages SET push_delivered = 1 WHERE push_delivered = 0")
+    await _db.commit()
     _cleanup_task = asyncio.create_task(cleanup_loop())
+    _redeliver_task = asyncio.create_task(redeliver_loop())
     logger.info(f"Broker started (version {VERSION})")
     yield
     _cleanup_task.cancel()
+    _redeliver_task.cancel()
     if _db:
         await _db.close()
     logger.info("Broker stopped")
@@ -104,8 +157,6 @@ async def health():
 @app.post("/shutdown")
 async def shutdown():
     conn = await get_db()
-    sessions = await db.get_sessions(conn, "%")
-    # Use a broader query to get all sessions
     cursor = await conn.execute("SELECT session_id, channel_url FROM peers")
     rows = await cursor.fetchall()
     notified = 0
@@ -134,24 +185,38 @@ async def shutdown():
 @app.post("/sessions")
 async def register_session(req: SessionRegister):
     conn = await get_db()
-    session_id = await db.generate_session_id(conn, req.role, req.namespace)
 
-    # Check if dispatcher already exists
-    if req.role == "dispatcher":
-        existing = await db.get_session(conn, "dispatcher-1")
-        if existing and existing["namespace"] == req.namespace:
-            # Re-register dispatcher
-            await db.delete_session(conn, "dispatcher-1")
+    # Validate channel_url format
+    if not req.channel_url.startswith("http://127.0.0.1:") and not req.channel_url.startswith("http://localhost:"):
+        error_response("INVALID_REQUEST", "channel_url は http://127.0.0.1 または http://localhost で始まる必要があります")
 
-    await db.register_session(
-        conn,
-        session_id=session_id,
-        namespace=req.namespace,
-        role=req.role,
-        work_dir=req.work_dir,
-        git_repo=req.git_repo,
-        channel_url=req.channel_url,
-    )
+    # Atomic dispatcher check + registration
+    await conn.execute("BEGIN IMMEDIATE")
+    try:
+        session_id = await db.generate_session_id(conn, req.role, req.namespace)
+
+        if req.role == "dispatcher":
+            existing = await db.get_session(conn, "dispatcher-1")
+            if existing:
+                if existing["namespace"] != req.namespace:
+                    await conn.execute("ROLLBACK")
+                    error_response("NAMESPACE_MISMATCH", f"別のnamespace ({existing['namespace']}) の Dispatcher が既に存在します")
+                await conn.execute("DELETE FROM peers WHERE session_id = ?", ("dispatcher-1",))
+
+        await db.register_session(
+            conn,
+            session_id=session_id,
+            namespace=req.namespace,
+            role=req.role,
+            work_dir=req.work_dir,
+            git_repo=req.git_repo,
+            channel_url=req.channel_url,
+        )
+        await conn.commit()
+    except Exception:
+        await conn.execute("ROLLBACK")
+        raise
+
     logger.info(f"Session registered: {session_id} (role={req.role}, ns={req.namespace})")
     return {"status": "ok", "session_id": session_id}
 
@@ -159,11 +224,18 @@ async def register_session(req: SessionRegister):
 @app.delete("/sessions/{session_id}")
 async def delete_session(session_id: str):
     conn = await get_db()
-    found = await db.delete_session(conn, session_id)
-    if not found:
-        error_response("SESSION_NOT_FOUND", "セッションが見つかりません", 404)
-    # Release locks held by this session
-    await db.release_session_locks(conn, session_id)
+    # Delete session and release its locks atomically
+    await conn.execute("BEGIN IMMEDIATE")
+    try:
+        cursor = await conn.execute("DELETE FROM peers WHERE session_id = ?", (session_id,))
+        if cursor.rowcount == 0:
+            await conn.execute("ROLLBACK")
+            error_response("SESSION_NOT_FOUND", "セッションが見つかりません", 404)
+        await conn.execute("DELETE FROM file_locks WHERE session_id = ?", (session_id,))
+        await conn.commit()
+    except Exception:
+        await conn.execute("ROLLBACK")
+        raise
     logger.info(f"Session deleted: {session_id}")
     return {"status": "ok"}
 
@@ -186,6 +258,7 @@ async def list_sessions(namespace: str = Query(...)):
             {
                 "session_id": s["session_id"],
                 "role": s["role"],
+                "mode": s["mode"],
                 "work_dir": s["work_dir"],
                 "current_task": s["current_task"],
                 "last_heartbeat": s["last_heartbeat"],
@@ -199,6 +272,26 @@ async def list_sessions(namespace: str = Query(...)):
 async def update_summary(session_id: str, req: SummaryUpdate):
     conn = await get_db()
     found = await db.update_summary(conn, session_id, req.summary)
+    if not found:
+        error_response("SESSION_NOT_FOUND", "セッションが見つかりません", 404)
+    return {"status": "ok"}
+
+
+@app.put("/sessions/{session_id}/role")
+async def update_role(session_id: str, req: RoleUpdate):
+    conn = await get_db()
+    found = await db.update_role(conn, session_id, req.role)
+    if not found:
+        error_response("SESSION_NOT_FOUND", "セッションが見つかりません", 404)
+    return {"status": "ok"}
+
+
+@app.put("/sessions/{session_id}/mode")
+async def update_mode(session_id: str, req: ModeUpdate):
+    conn = await get_db()
+    if req.mode not in ("MANUAL", "HYBRID", "FULL_AUTO"):
+        error_response("INVALID_REQUEST", "モードは MANUAL / HYBRID / FULL_AUTO のいずれかです")
+    found = await db.update_mode(conn, session_id, req.mode)
     if not found:
         error_response("SESSION_NOT_FOUND", "セッションが見つかりません", 404)
     return {"status": "ok"}
@@ -238,10 +331,15 @@ async def send_message(req: MessageSend):
         "content": req.content,
         "timestamp": db.now_iso(),
     }
-    await deliver_to_channel(recipient["channel_url"], payload)
+    delivered = await deliver_to_channel(recipient["channel_url"], payload)
+    if delivered:
+        await db.mark_push_delivered(conn, msg_id)
 
-    logger.info(f"Message {msg_id}: {req.from_id} -> {req.to_id}")
-    return {"status": "ok", "message_id": f"msg-{msg_id:03d}"}
+    logger.info(f"Message {msg_id}: {req.from_id} -> {req.to_id} (delivered={delivered})")
+    result = {"status": "ok", "message_id": f"msg-{msg_id:03d}"}
+    if not delivered:
+        result["warning"] = f"メッセージは保存されましたが、{req.to_id} への配信に失敗しました。再配信を自動リトライします"
+    return result
 
 
 @app.post("/messages/broadcast")
@@ -256,12 +354,13 @@ async def broadcast_message(req: BroadcastSend):
     sessions = await db.get_sessions(conn, namespace)
 
     delivered_to = []
+    failed_to = []
     for s in sessions:
         if s["session_id"] == req.from_id:
             continue  # Don't send to self
 
         # Store individual message
-        await db.store_message(conn, req.from_id, s["session_id"], namespace, req.content)
+        bc_msg_id = await db.store_message(conn, req.from_id, s["session_id"], namespace, req.content)
 
         # Deliver
         payload = {
@@ -272,10 +371,16 @@ async def broadcast_message(req: BroadcastSend):
         }
         success = await deliver_to_channel(s["channel_url"], payload)
         if success:
+            await db.mark_push_delivered(conn, bc_msg_id)
             delivered_to.append(s["session_id"])
+        else:
+            failed_to.append(s["session_id"])
 
-    logger.info(f"Broadcast from {req.from_id} to {delivered_to}")
-    return {"status": "ok", "delivered_to": delivered_to}
+    logger.info(f"Broadcast from {req.from_id}: delivered={delivered_to}, failed={failed_to}")
+    result: dict = {"status": "ok", "delivered_to": delivered_to}
+    if failed_to:
+        result["warning"] = f"以下のセッションへの配信に失敗しました: {', '.join(failed_to)}"
+    return result
 
 
 @app.get("/messages/{session_id}")
@@ -340,6 +445,140 @@ async def list_locks(namespace: str = Query(...)):
 
 
 # ===================
+# Worker spawning (batch)
+# ===================
+
+
+def _build_wt_command(workers: list[dict], split: bool) -> str:
+    """Build a single wt command for batch worker launch.
+
+    For split mode, creates a 2x2 grid layout (workers 1-3):
+        [D | W1] / [W2 | W3]
+    Workers 4+ fall back to new-tab.
+    """
+    claude_cmd = "claude --dangerously-load-development-channels server:claude-peers"
+    parts: list[str] = []
+
+    for w in workers:
+        pane_cmd = f'--title "{w["name"]}" --startingDirectory "{w["dir"]}" cmd /k {claude_cmd}'
+
+        if not split or w["num"] > 3:
+            parts.append(f"new-tab {pane_cmd}")
+        elif w["num"] == 1:
+            # D | W1 (vertical split, 50/50)
+            parts.append(f"split-pane --vertical --size 0.5 {pane_cmd}")
+        elif w["num"] == 2:
+            # Focus D (left), split horizontally → W2 below D
+            parts.append("move-focus --direction left")
+            parts.append(f"split-pane --horizontal --size 0.5 {pane_cmd}")
+        elif w["num"] == 3:
+            # Focus W1 (right), split horizontally → W3 below W1 → 2x2
+            parts.append("move-focus --direction right")
+            parts.append(f"split-pane --horizontal --size 0.5 {pane_cmd}")
+
+    return "-w 0 " + " ; ".join(parts)
+
+
+async def _flush_spawn_queue():
+    """Execute all queued spawns as a single wt command."""
+    global _spawn_queue
+    if not _spawn_queue:
+        return
+
+    workers = _spawn_queue[:]
+    _spawn_queue = []
+
+    wt_args = _build_wt_command(workers, _spawn_config["split"])
+    try:
+        subprocess.Popen(f"wt {wt_args}", shell=True)
+        names = [w["name"] for w in workers]
+        logger.info(f"Batch spawned {len(workers)} workers: {names}")
+    except Exception as e:
+        logger.error(f"Batch spawn failed: {e}")
+
+
+async def _spawn_batch_timer():
+    """Wait for batch delay, then flush."""
+    await asyncio.sleep(SPAWN_BATCH_DELAY)
+    await _flush_spawn_queue()
+
+
+@app.post("/spawn")
+async def spawn_worker(req: SpawnRequest):
+    conn = await get_db()
+
+    # Validate requester is dispatcher (case-insensitive, also check session_id prefix)
+    requester = await db.get_session(conn, req.requested_by)
+    is_dispatcher = (
+        requester
+        and (requester["role"].lower() == "dispatcher" or req.requested_by.startswith("dispatcher-"))
+    )
+    if not is_dispatcher:
+        error_response("FORBIDDEN", "spawn はDispatcherのみ実行できます", 403)
+
+    # Check spawn config
+    if not _spawn_config["project_dir"]:
+        error_response("NOT_CONFIGURED", "spawn 設定が未構成です（--project-dir が必要）", 500)
+
+    # Check max workers (consider both DB sessions and queued spawns)
+    next_num = await db.get_next_worker_number(conn, req.namespace)
+    queued_nums = [w["num"] for w in _spawn_queue]
+    if queued_nums:
+        next_num = max(next_num, max(queued_nums) + 1)
+    if next_num > _spawn_config["max_workers"]:
+        error_response("LIMIT_REACHED", f"Worker数上限 ({_spawn_config['max_workers']}) に達しています")
+
+    worker_name = f"worker-{next_num}"
+    project_dir = _spawn_config["project_dir"]
+    claude_peers_dir = Path(project_dir) / ".claude-peers"
+    worker_dir = claude_peers_dir / worker_name
+
+    # Create worker directory with .mcp.json
+    worker_dir.mkdir(parents=True, exist_ok=True)
+    channel_script = _spawn_config["channel_script"].replace("\\", "/")
+    mcp_config = {
+        "mcpServers": {
+            "claude-peers": {
+                "command": _spawn_config["tsx_path"],
+                "args": [
+                    channel_script,
+                    "--role", "worker",
+                    "--namespace", req.namespace,
+                    "--broker", f"http://127.0.0.1:{app.state.port}",
+                    "--mode", _spawn_config["mode"],
+                ],
+            }
+        }
+    }
+    (worker_dir / ".mcp.json").write_text(json.dumps(mcp_config, indent=2), encoding="utf-8")
+
+    # Create .claude/settings.json
+    settings_dir = worker_dir / ".claude"
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    settings = {
+        "permissions": {"allow": _spawn_config["permissions"]},
+        "enableAllProjectMcpServers": True,
+    }
+    (settings_dir / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+    # Queue for batch launch (single wt command for reliable pane layout)
+    global _spawn_timer
+    _spawn_queue.append({
+        "name": worker_name,
+        "dir": str(worker_dir),
+        "num": next_num,
+    })
+
+    # Reset batch timer — flush after SPAWN_BATCH_DELAY seconds of no new requests
+    if _spawn_timer and not _spawn_timer.done():
+        _spawn_timer.cancel()
+    _spawn_timer = asyncio.create_task(_spawn_batch_timer())
+
+    logger.info(f"Queued {worker_name} for batch spawn (namespace={req.namespace})")
+    return {"status": "ok", "worker_id": worker_name}
+
+
+# ===================
 # Entry point
 # ===================
 
@@ -347,6 +586,23 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="claude-peers broker daemon")
     parser.add_argument("--port", type=int, default=7799, help="Port to listen on")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to bind to")
+    parser.add_argument("--project-dir", type=str, default=None, help="Project directory path")
+    parser.add_argument("--channel-script", type=str, default=None, help="Path to channel-server.ts")
+    parser.add_argument("--tsx-path", type=str, default=None, help="Path to tsx.cmd")
+    parser.add_argument("--mode", type=str, default="HYBRID", help="Autonomy mode")
+    parser.add_argument("--max-workers", type=int, default=8, help="Maximum number of workers")
+    parser.add_argument("--split", action="store_true", help="Use split panes instead of tabs for spawned workers")
     args = parser.parse_args()
+
+    # Store spawn configuration
+    _spawn_config["project_dir"] = args.project_dir
+    _spawn_config["channel_script"] = args.channel_script
+    _spawn_config["tsx_path"] = args.tsx_path
+    _spawn_config["mode"] = args.mode
+    _spawn_config["max_workers"] = args.max_workers
+    _spawn_config["split"] = args.split
+
+    # Store port in app state for spawn endpoint
+    app.state.port = args.port
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

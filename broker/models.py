@@ -18,6 +18,10 @@ class SummaryUpdate(BaseModel):
     summary: str
 
 
+class RoleUpdate(BaseModel):
+    role: str
+
+
 class MessageSend(BaseModel):
     from_id: str
     to_id: str
@@ -29,6 +33,15 @@ class BroadcastSend(BaseModel):
     content: str
 
 
+class ModeUpdate(BaseModel):
+    mode: str
+
+
 class LockRequest(BaseModel):
     session_id: str
     file_path: str
+
+
+class SpawnRequest(BaseModel):
+    namespace: str
+    requested_by: str

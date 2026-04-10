@@ -20,6 +20,7 @@ async def init_db(db_path: str = DB_PATH) -> aiosqlite.Connection:
             work_dir       TEXT,
             git_repo       TEXT,
             current_task   TEXT,
+            mode           TEXT DEFAULT 'HYBRID',
             channel_url    TEXT NOT NULL,
             last_heartbeat DATETIME DEFAULT CURRENT_TIMESTAMP,
             created_at     DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -28,13 +29,14 @@ async def init_db(db_path: str = DB_PATH) -> aiosqlite.Connection:
         CREATE INDEX IF NOT EXISTS idx_peers_namespace ON peers(namespace);
 
         CREATE TABLE IF NOT EXISTS messages (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            from_id    TEXT NOT NULL,
-            to_id      TEXT,
-            namespace  TEXT NOT NULL,
-            content    TEXT NOT NULL,
-            read_flag  INTEGER DEFAULT 0,
-            timestamp  DATETIME DEFAULT CURRENT_TIMESTAMP
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_id         TEXT NOT NULL,
+            to_id           TEXT,
+            namespace       TEXT NOT NULL,
+            content         TEXT NOT NULL,
+            read_flag       INTEGER DEFAULT 0,
+            push_delivered  INTEGER DEFAULT 0,
+            timestamp       DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_messages_to_id ON messages(to_id, read_flag);
@@ -51,6 +53,7 @@ async def init_db(db_path: str = DB_PATH) -> aiosqlite.Connection:
         CREATE INDEX IF NOT EXISTS idx_locks_namespace ON file_locks(namespace);
         CREATE INDEX IF NOT EXISTS idx_locks_session ON file_locks(session_id);
 
+        -- TODO: Phase 6 で使用予定（タスクキュー機能）
         CREATE TABLE IF NOT EXISTS tasks (
             task_id        TEXT PRIMARY KEY,
             namespace      TEXT NOT NULL,
@@ -68,6 +71,16 @@ async def init_db(db_path: str = DB_PATH) -> aiosqlite.Connection:
         CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assignee_id);
     """)
     await db.commit()
+
+    # Migration: add push_delivered column if missing (existing DBs)
+    try:
+        await db.execute("ALTER TABLE messages ADD COLUMN push_delivered INTEGER DEFAULT 0")
+        # Mark all existing messages as delivered to avoid redeliver storm
+        await db.execute("UPDATE messages SET push_delivered = 1")
+        await db.commit()
+    except Exception:
+        pass  # Column already exists
+
     return db
 
 
@@ -101,7 +114,7 @@ async def register_session(
     git_repo: Optional[str],
     channel_url: str,
 ) -> None:
-    """Register a new session."""
+    """Register a new session. Caller is responsible for commit/transaction."""
     now = now_iso()
     await db.execute(
         """INSERT OR REPLACE INTO peers
@@ -109,14 +122,6 @@ async def register_session(
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (session_id, namespace, role, work_dir, git_repo, channel_url, now, now),
     )
-    await db.commit()
-
-
-async def delete_session(db: aiosqlite.Connection, session_id: str) -> bool:
-    """Delete a session. Returns True if found."""
-    cursor = await db.execute("DELETE FROM peers WHERE session_id = ?", (session_id,))
-    await db.commit()
-    return cursor.rowcount > 0
 
 
 async def get_session(db: aiosqlite.Connection, session_id: str) -> Optional[dict]:
@@ -149,6 +154,26 @@ async def update_heartbeat(db: aiosqlite.Connection, session_id: str) -> bool:
     return cursor.rowcount > 0
 
 
+async def update_role(db: aiosqlite.Connection, session_id: str, role: str) -> bool:
+    """Update role for a session. Returns True if found."""
+    cursor = await db.execute(
+        "UPDATE peers SET role = ? WHERE session_id = ?",
+        (role, session_id),
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def update_mode(db: aiosqlite.Connection, session_id: str, mode: str) -> bool:
+    """Update autonomy mode for a session. Returns True if found."""
+    cursor = await db.execute(
+        "UPDATE peers SET mode = ? WHERE session_id = ?",
+        (mode, session_id),
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
 async def update_summary(db: aiosqlite.Connection, session_id: str, summary: str) -> bool:
     """Update current_task for a session. Returns True if found."""
     cursor = await db.execute(
@@ -171,16 +196,22 @@ async def get_stale_sessions(db: aiosqlite.Connection, timeout_seconds: int = 60
 
 
 async def cleanup_stale_sessions(db: aiosqlite.Connection, timeout_seconds: int = 60) -> list[str]:
-    """Remove stale sessions and their locks. Returns list of removed session_ids."""
+    """Remove stale sessions and their locks atomically. Returns list of removed session_ids."""
     stale = await get_stale_sessions(db, timeout_seconds)
+    if not stale:
+        return []
     removed = []
-    for s in stale:
-        sid = s["session_id"]
-        await db.execute("DELETE FROM peers WHERE session_id = ?", (sid,))
-        await db.execute("DELETE FROM file_locks WHERE session_id = ?", (sid,))
-        removed.append(sid)
-    if removed:
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        for s in stale:
+            sid = s["session_id"]
+            await db.execute("DELETE FROM peers WHERE session_id = ?", (sid,))
+            await db.execute("DELETE FROM file_locks WHERE session_id = ?", (sid,))
+            removed.append(sid)
         await db.commit()
+    except Exception:
+        await db.execute("ROLLBACK")
+        raise
     return removed
 
 
@@ -224,6 +255,30 @@ async def get_unread_messages(db: aiosqlite.Connection, session_id: str) -> list
     return messages
 
 
+async def mark_push_delivered(db: aiosqlite.Connection, msg_id: int) -> None:
+    """Mark a message as successfully push-delivered."""
+    await db.execute("UPDATE messages SET push_delivered = 1 WHERE id = ?", (msg_id,))
+    await db.commit()
+
+
+async def get_undelivered_messages(db: aiosqlite.Connection) -> list[dict]:
+    """Get messages that were stored but push delivery failed (older than 5 seconds)."""
+    cursor = await db.execute(
+        """SELECT m.id, m.from_id, m.to_id, m.content, m.timestamp,
+                  p.channel_url, COALESCE(sender.role, 'unknown') AS from_role
+           FROM messages m
+           JOIN peers p ON m.to_id = p.session_id
+           LEFT JOIN peers sender ON m.from_id = sender.session_id
+           WHERE m.push_delivered = 0
+             AND m.to_id IS NOT NULL
+             AND datetime(m.timestamp, '+5 seconds') < datetime('now')
+           ORDER BY m.timestamp
+           LIMIT 20"""
+    )
+    rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
+
+
 # --- File lock operations ---
 
 async def acquire_lock(
@@ -233,39 +288,49 @@ async def acquire_lock(
     namespace: str,
     duration_minutes: int = 30,
 ) -> dict:
-    """Try to acquire a file lock. Returns status dict."""
-    # Check for existing lock
-    cursor = await db.execute(
-        "SELECT * FROM file_locks WHERE file_path = ?", (file_path,)
-    )
-    existing = await cursor.fetchone()
-
-    if existing:
-        existing = dict(existing)
-        # Check if expired
-        expires = existing["expires_at"]
-        if expires and datetime.fromisoformat(expires.replace("Z", "+00:00")) < datetime.now(timezone.utc):
-            # Expired - remove and allow new lock
-            await db.execute("DELETE FROM file_locks WHERE file_path = ?", (file_path,))
-        elif existing["session_id"] != session_id:
-            return {
-                "status": "conflict",
-                "locked_by": existing["session_id"],
-                "acquired_at": existing["acquired_at"],
-            }
-
-    now = datetime.now(timezone.utc)
+    """Try to acquire a file lock. Uses BEGIN IMMEDIATE for atomicity."""
     from datetime import timedelta
-    expires_at = (now + timedelta(minutes=duration_minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    now_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    await db.execute(
-        """INSERT OR REPLACE INTO file_locks (file_path, session_id, namespace, acquired_at, expires_at)
-           VALUES (?, ?, ?, ?, ?)""",
-        (file_path, session_id, namespace, now_str, expires_at),
-    )
-    await db.commit()
-    return {"status": "ok", "expires_at": expires_at}
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        cursor = await db.execute(
+            "SELECT * FROM file_locks WHERE file_path = ?", (file_path,)
+        )
+        existing = await cursor.fetchone()
+
+        if existing:
+            existing = dict(existing)
+            expires = existing["expires_at"]
+            is_expired = (
+                expires
+                and datetime.fromisoformat(expires.replace("Z", "+00:00"))
+                < datetime.now(timezone.utc)
+            )
+
+            if is_expired:
+                await db.execute("DELETE FROM file_locks WHERE file_path = ?", (file_path,))
+            elif existing["session_id"] != session_id:
+                await db.execute("ROLLBACK")
+                return {
+                    "status": "conflict",
+                    "locked_by": existing["session_id"],
+                    "acquired_at": existing["acquired_at"],
+                }
+
+        now = datetime.now(timezone.utc)
+        expires_at = (now + timedelta(minutes=duration_minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        now_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        await db.execute(
+            """INSERT OR REPLACE INTO file_locks (file_path, session_id, namespace, acquired_at, expires_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (file_path, session_id, namespace, now_str, expires_at),
+        )
+        await db.commit()
+        return {"status": "ok", "expires_at": expires_at}
+    except Exception:
+        await db.execute("ROLLBACK")
+        raise
 
 
 async def release_lock(db: aiosqlite.Connection, session_id: str, file_path: str) -> bool:
@@ -281,7 +346,7 @@ async def release_lock(db: aiosqlite.Connection, session_id: str, file_path: str
 async def get_locks(db: aiosqlite.Connection, namespace: str) -> list[dict]:
     """Get all locks in a namespace."""
     cursor = await db.execute(
-        """SELECT fl.file_path, fl.session_id, p.role, fl.acquired_at, fl.expires_at
+        """SELECT fl.file_path, fl.session_id, COALESCE(p.role, 'unknown') as role, fl.acquired_at, fl.expires_at
            FROM file_locks fl
            LEFT JOIN peers p ON fl.session_id = p.session_id
            WHERE fl.namespace = ?""",
@@ -298,3 +363,21 @@ async def release_session_locks(db: aiosqlite.Connection, session_id: str) -> in
     )
     await db.commit()
     return cursor.rowcount
+
+
+async def get_next_worker_number(db: aiosqlite.Connection, namespace: str) -> int:
+    """Return the next available worker number for the namespace."""
+    cursor = await db.execute(
+        "SELECT session_id FROM peers WHERE namespace = ? AND session_id LIKE 'worker-%'",
+        (namespace,),
+    )
+    rows = await cursor.fetchall()
+    max_num = 0
+    for r in rows:
+        try:
+            num = int(dict(r)["session_id"].split("-")[1])
+            if num > max_num:
+                max_num = num
+        except (IndexError, ValueError):
+            pass
+    return max_num + 1

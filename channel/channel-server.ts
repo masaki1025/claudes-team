@@ -22,18 +22,20 @@ import type { IncomingPayload, PushPayload } from "./types.js";
 
 // --- Parse CLI arguments ---
 
-function parseArgs(): { role: string; namespace: string; brokerUrl: string } {
+function parseArgs(): { role: string; namespace: string; brokerUrl: string; mode: string } {
   const args = process.argv.slice(2);
   let role = "worker";
   let namespace = "default";
   let brokerUrl = "http://localhost:7799";
+  let mode = "HYBRID";
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--role" && args[i + 1]) role = args[++i];
     else if (args[i] === "--namespace" && args[i + 1]) namespace = args[++i];
     else if (args[i] === "--broker" && args[i + 1]) brokerUrl = args[++i];
+    else if (args[i] === "--mode" && args[i + 1]) mode = args[++i];
   }
-  return { role, namespace, brokerUrl };
+  return { role, namespace, brokerUrl, mode };
 }
 
 // --- Load system prompt ---
@@ -52,12 +54,9 @@ function loadInstructions(role: string): string {
 // --- Main ---
 
 async function main() {
-  const { role, namespace, brokerUrl } = parseArgs();
+  const { role, namespace, brokerUrl, mode } = parseArgs();
   const instructions = loadInstructions(role);
   const broker = new BrokerClient(brokerUrl, namespace);
-
-  // Track current mode (for dispatcher)
-  let currentMode = "HYBRID";
 
   // Create MCP server
   const server = new Server(
@@ -101,7 +100,7 @@ async function main() {
           const peers = await broker.listPeers();
           const lines = peers.map(
             (p) =>
-              `- ${p.session_id} (${p.role}) ${p.current_task || "待機中"}`
+              `- ${p.session_id} (${p.role}, ${p.mode}) ${p.current_task || "待機中"}`
           );
           return text(
             lines.length > 0
@@ -155,15 +154,20 @@ async function main() {
 
         case "set_role": {
           const { role: newRole } = args as { role: string };
-          // Role is updated via summary or metadata; for now just acknowledge
-          await broker.updateSummary(`role=${newRole}`);
+          await broker.updateRole(newRole);
           return text(`ロールを ${newRole} に設定しました`);
         }
 
         case "set_mode": {
           const { mode } = args as { mode: string };
-          currentMode = mode;
+          await broker.updateMode(mode);
           return text(`自律性モードを ${mode} に変更しました`);
+        }
+
+        case "spawn_worker": {
+          const { reason } = args as { reason: string };
+          const result = await broker.spawnWorker(reason);
+          return text(`${result.worker_id} を起動しました（理由: ${reason}）。起動完了まで10〜15秒かかります。list_peers()で確認してください。`);
         }
 
         default:
@@ -179,50 +183,50 @@ async function main() {
   const httpServer = http.createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/push") {
       let body = "";
+      let aborted = false;
+
+      req.on("error", (err) => {
+        aborted = true;
+        log(`Push request stream error: ${err.message}`);
+        if (!res.headersSent) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ status: "error", message: err.message }));
+        }
+      });
+
       req.on("data", (chunk: Buffer) => {
         body += chunk.toString();
       });
+
       req.on("end", async () => {
+        if (aborted) return;
         try {
           const payload: IncomingPayload = JSON.parse(body);
 
           if ("type" in payload && payload.type === "shutdown") {
-            // Shutdown notification from broker
-            await server.notification({
-              method: "notifications/claude/channel" as any,
-              params: {
-                channel: "claude-peers",
-                content: `ブローカーが停止しました: ${payload.message}`,
-              },
-            } as any);
+            await pushToChannel(server, `ブローカーが停止しました: ${payload.message}`);
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ status: "ok" }));
-            // Graceful shutdown
             setTimeout(() => process.exit(0), 1000);
             return;
           }
 
           // Normal message push
           const msg = payload as PushPayload;
-          await server.notification({
-            method: "notifications/claude/channel" as any,
-            params: {
-              channel: "claude-peers",
-              content: msg.content,
-              meta: {
-                from_id: msg.from_id,
-                from_role: msg.from_role,
-                timestamp: msg.timestamp,
-              },
-            },
-          } as any);
+          await pushToChannel(server, msg.content, {
+            from_id: msg.from_id,
+            from_role: msg.from_role,
+            timestamp: msg.timestamp,
+          });
 
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ status: "ok" }));
         } catch (err: any) {
           log(`Push error: ${err.message}`);
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ status: "error", message: err.message }));
+          if (!res.headersSent) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ status: "error", message: err.message }));
+          }
         }
       });
     } else {
@@ -246,6 +250,12 @@ async function main() {
   const workDir = process.cwd();
   const sessionId = await broker.register(role, workDir, channelUrl);
   log(`Registered as ${sessionId} (role=${role}, ns=${namespace})`);
+
+  // Apply initial autonomy mode
+  if (mode !== "HYBRID") {
+    await broker.updateMode(mode);
+    log(`Mode set to ${mode}`);
+  }
 
   // Heartbeat loop
   const heartbeatInterval = setInterval(async () => {
@@ -282,6 +292,18 @@ function text(content: string, isError = false) {
     content: [{ type: "text" as const, text: content }],
     isError,
   };
+}
+
+/** Send a claude/channel notification. Uses `as any` once to bridge the custom protocol type. */
+async function pushToChannel(
+  server: Server,
+  content: string,
+  meta?: Record<string, string>,
+): Promise<void> {
+  await (server as any).notification({
+    method: "notifications/claude/channel",
+    params: { channel: "claude-peers", content, ...(meta ? { meta } : {}) },
+  });
 }
 
 function log(msg: string) {
