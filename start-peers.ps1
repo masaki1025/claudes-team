@@ -159,19 +159,31 @@ if ($workers -eq 0) {
   # Dispatcher のみ起動（Workerは動的にspawn）
   $wtCmd = "new-tab --title `"Dispatcher`" --tabColor #808080 --startingDirectory `"$dispatcherDir`" cmd /k $claudeCmd"
 } elseif (-not $tabs) {
-  # 分割表示モード: 均等サイズで分割
-  $total = $workers + 1  # Dispatcher + Workers
+  # 分割表示モード: 2x2 グリッドレイアウト
+  #   1 worker:  [D | W1]
+  #   2 workers: [D | W1] / [W2 |   ]
+  #   3 workers: [D | W1] / [W2 | W3]
   $wtCmd = "new-tab --title `"Dispatcher`" --tabColor #808080 --startingDirectory `"$dispatcherDir`" cmd /k $claudeCmd"
 
-  # Worker を均等サイズで追加（各Worker個別ディレクトリ）
   for ($i = 1; $i -le $workers; $i++) {
     $workerIDir = Join-Path $claudePeersDir "worker-$i"
-    $remaining = $total - $i + 1
-    $size = [math]::Round(1.0 / $remaining, 2)
-    if ($i -eq 1) {
-      $wtCmd += " `; split-pane --horizontal --size $size --title `"Worker-$i`" --startingDirectory `"$workerIDir`" cmd /k $claudeCmd"
-    } else {
-      $wtCmd += " `; split-pane --vertical --size $size --title `"Worker-$i`" --startingDirectory `"$workerIDir`" cmd /k $claudeCmd"
+    $workerPane = "--title `"Worker-$i`" --startingDirectory `"$workerIDir`" cmd /k $claudeCmd"
+    switch ($i) {
+      1 {
+        # D | W1 (vertical split, 50/50)
+        $wtCmd += " `; split-pane --vertical --size 0.5 $workerPane"
+      }
+      2 {
+        # Focus D (left), split horizontally → W2 below D
+        $wtCmd += " `; move-focus --direction left `; split-pane --horizontal --size 0.5 $workerPane"
+      }
+      3 {
+        # Focus W1 (right), split horizontally → W3 below W1 → 2x2 grid
+        $wtCmd += " `; move-focus --direction right `; split-pane --horizontal --size 0.5 $workerPane"
+      }
+      default {
+        $wtCmd += " `; split-pane --horizontal --size 0.5 $workerPane"
+      }
     }
   }
 } else {
