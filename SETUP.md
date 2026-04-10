@@ -33,11 +33,12 @@ claude-peers/
     worker.md                      Worker 用
   specs/                         設計仕様書
   docs/                          アーキテクチャ解説
-  setup.ps1                      環境構築スクリプト
-  start-peers.ps1                起動スクリプト
-  stop-peers.ps1                 停止スクリプト
-  claude-peers.cmd               起動ラッパー（cmd用）
-  stop-peers.cmd                 停止ラッパー（cmd用）
+  setup.cmd                      環境構築コマンド（初回のみ）
+  claude-peers.cmd               起動コマンド
+  stop-peers.cmd                 停止コマンド
+  setup.ps1                      環境構築スクリプト（setup.cmd が呼び出す）
+  start-peers.ps1                起動スクリプト（claude-peers.cmd が呼び出す）
+  stop-peers.ps1                 停止スクリプト（stop-peers.cmd が呼び出す）
 ```
 
 ### ランタイムで生成されるファイル（git管理外）
@@ -72,7 +73,7 @@ cd claude-peers
 ### 2. 環境構築
 
 ```cmd
-powershell -ExecutionPolicy Bypass -File setup.ps1
+setup.cmd
 ```
 
 以下が自動で実行されます:
