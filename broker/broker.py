@@ -40,6 +40,7 @@ logging.basicConfig(
 # Global database connection
 _db = None
 _cleanup_task = None
+_redeliver_task = None
 
 # Spawn configuration (set at startup via CLI args)
 _spawn_config = {
@@ -48,23 +49,34 @@ _spawn_config = {
     "tsx_path": None,
     "mode": "HYBRID",
     "max_workers": 8,
+    "split": False,
     "permissions": ["Bash", "Edit", "Write", "Read", "Glob", "Grep", "WebFetch", "mcp__claude-peers"],
 }
+
+# Spawn batch queue — collect spawn requests and launch as a single wt command
+_spawn_queue: list[dict] = []
+_spawn_timer: asyncio.Task | None = None
+SPAWN_BATCH_DELAY = 3.0  # seconds to wait before flushing
 
 
 async def get_db():
     return _db
 
 
-async def deliver_to_channel(channel_url: str, payload: dict) -> bool:
-    """Deliver a message to a channel server's /push endpoint."""
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(channel_url, json=payload)
-            return resp.status_code == 200
-    except Exception as e:
-        logger.warning(f"Failed to deliver to {channel_url}: {e}")
-        return False
+async def deliver_to_channel(channel_url: str, payload: dict, retries: int = 3) -> bool:
+    """Deliver a message to a channel server's /push endpoint with retry."""
+    for attempt in range(retries):
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(channel_url, json=payload)
+                if resp.status_code == 200:
+                    return True
+                logger.warning(f"Delivery to {channel_url} returned {resp.status_code} (attempt {attempt + 1}/{retries})")
+        except Exception as e:
+            logger.warning(f"Delivery to {channel_url} failed (attempt {attempt + 1}/{retries}): {e}")
+        if attempt < retries - 1:
+            await asyncio.sleep(1.0 * (attempt + 1))
+    return False
 
 
 async def cleanup_loop():
@@ -79,14 +91,40 @@ async def cleanup_loop():
             logger.error(f"Cleanup error: {e}")
 
 
+async def redeliver_loop():
+    """Periodically retry push delivery for undelivered messages."""
+    while True:
+        await asyncio.sleep(10)
+        try:
+            undelivered = await db.get_undelivered_messages(_db)
+            for msg in undelivered:
+                payload = {
+                    "from_id": msg["from_id"],
+                    "from_role": msg["from_role"],
+                    "content": msg["content"],
+                    "timestamp": msg["timestamp"],
+                }
+                success = await deliver_to_channel(msg["channel_url"], payload, retries=1)
+                if success:
+                    await db.mark_push_delivered(_db, msg["id"])
+                    logger.info(f"Redelivered message {msg['id']} to {msg['to_id']}")
+        except Exception as e:
+            logger.warning(f"Redeliver loop error: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _db, _cleanup_task
+    global _db, _cleanup_task, _redeliver_task
     _db = await init_db(DB_PATH)
+    # Mark all pre-existing messages as delivered to avoid redeliver storm on restart
+    await _db.execute("UPDATE messages SET push_delivered = 1 WHERE push_delivered = 0")
+    await _db.commit()
     _cleanup_task = asyncio.create_task(cleanup_loop())
+    _redeliver_task = asyncio.create_task(redeliver_loop())
     logger.info(f"Broker started (version {VERSION})")
     yield
     _cleanup_task.cancel()
+    _redeliver_task.cancel()
     if _db:
         await _db.close()
     logger.info("Broker stopped")
@@ -294,11 +332,13 @@ async def send_message(req: MessageSend):
         "timestamp": db.now_iso(),
     }
     delivered = await deliver_to_channel(recipient["channel_url"], payload)
+    if delivered:
+        await db.mark_push_delivered(conn, msg_id)
 
     logger.info(f"Message {msg_id}: {req.from_id} -> {req.to_id} (delivered={delivered})")
     result = {"status": "ok", "message_id": f"msg-{msg_id:03d}"}
     if not delivered:
-        result["warning"] = f"メッセージは保存されましたが、{req.to_id} への配信に失敗しました"
+        result["warning"] = f"メッセージは保存されましたが、{req.to_id} への配信に失敗しました。再配信を自動リトライします"
     return result
 
 
@@ -320,7 +360,7 @@ async def broadcast_message(req: BroadcastSend):
             continue  # Don't send to self
 
         # Store individual message
-        await db.store_message(conn, req.from_id, s["session_id"], namespace, req.content)
+        bc_msg_id = await db.store_message(conn, req.from_id, s["session_id"], namespace, req.content)
 
         # Deliver
         payload = {
@@ -331,6 +371,7 @@ async def broadcast_message(req: BroadcastSend):
         }
         success = await deliver_to_channel(s["channel_url"], payload)
         if success:
+            await db.mark_push_delivered(conn, bc_msg_id)
             delivered_to.append(s["session_id"])
         else:
             failed_to.append(s["session_id"])
@@ -404,24 +445,86 @@ async def list_locks(namespace: str = Query(...)):
 
 
 # ===================
-# Worker spawning
+# Worker spawning (batch)
 # ===================
+
+
+def _build_wt_command(workers: list[dict], split: bool) -> str:
+    """Build a single wt command for batch worker launch.
+
+    For split mode, creates a 2x2 grid layout (workers 1-3):
+        [D | W1] / [W2 | W3]
+    Workers 4+ fall back to new-tab.
+    """
+    claude_cmd = "claude --dangerously-load-development-channels server:claude-peers"
+    parts: list[str] = []
+
+    for w in workers:
+        pane_cmd = f'--title "{w["name"]}" --startingDirectory "{w["dir"]}" cmd /k {claude_cmd}'
+
+        if not split or w["num"] > 3:
+            parts.append(f"new-tab {pane_cmd}")
+        elif w["num"] == 1:
+            # D | W1 (vertical split, 50/50)
+            parts.append(f"split-pane --vertical --size 0.5 {pane_cmd}")
+        elif w["num"] == 2:
+            # Focus D (left), split horizontally → W2 below D
+            parts.append("move-focus --direction left")
+            parts.append(f"split-pane --horizontal --size 0.5 {pane_cmd}")
+        elif w["num"] == 3:
+            # Focus W1 (right), split horizontally → W3 below W1 → 2x2
+            parts.append("move-focus --direction right")
+            parts.append(f"split-pane --horizontal --size 0.5 {pane_cmd}")
+
+    return "-w 0 " + " ; ".join(parts)
+
+
+async def _flush_spawn_queue():
+    """Execute all queued spawns as a single wt command."""
+    global _spawn_queue
+    if not _spawn_queue:
+        return
+
+    workers = _spawn_queue[:]
+    _spawn_queue = []
+
+    wt_args = _build_wt_command(workers, _spawn_config["split"])
+    try:
+        subprocess.Popen(f"wt {wt_args}", shell=True)
+        names = [w["name"] for w in workers]
+        logger.info(f"Batch spawned {len(workers)} workers: {names}")
+    except Exception as e:
+        logger.error(f"Batch spawn failed: {e}")
+
+
+async def _spawn_batch_timer():
+    """Wait for batch delay, then flush."""
+    await asyncio.sleep(SPAWN_BATCH_DELAY)
+    await _flush_spawn_queue()
+
 
 @app.post("/spawn")
 async def spawn_worker(req: SpawnRequest):
     conn = await get_db()
 
-    # Validate requester is dispatcher
+    # Validate requester is dispatcher (case-insensitive, also check session_id prefix)
     requester = await db.get_session(conn, req.requested_by)
-    if not requester or requester["role"] != "dispatcher":
+    is_dispatcher = (
+        requester
+        and (requester["role"].lower() == "dispatcher" or req.requested_by.startswith("dispatcher-"))
+    )
+    if not is_dispatcher:
         error_response("FORBIDDEN", "spawn はDispatcherのみ実行できます", 403)
 
     # Check spawn config
     if not _spawn_config["project_dir"]:
         error_response("NOT_CONFIGURED", "spawn 設定が未構成です（--project-dir が必要）", 500)
 
-    # Check max workers
+    # Check max workers (consider both DB sessions and queued spawns)
     next_num = await db.get_next_worker_number(conn, req.namespace)
+    queued_nums = [w["num"] for w in _spawn_queue]
+    if queued_nums:
+        next_num = max(next_num, max(queued_nums) + 1)
     if next_num > _spawn_config["max_workers"]:
         error_response("LIMIT_REACHED", f"Worker数上限 ({_spawn_config['max_workers']}) に達しています")
 
@@ -452,18 +555,26 @@ async def spawn_worker(req: SpawnRequest):
     # Create .claude/settings.json
     settings_dir = worker_dir / ".claude"
     settings_dir.mkdir(parents=True, exist_ok=True)
-    settings = {"permissions": {"allow": _spawn_config["permissions"]}}
+    settings = {
+        "permissions": {"allow": _spawn_config["permissions"]},
+        "enableAllProjectMcpServers": True,
+    }
     (settings_dir / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
 
-    # Launch Windows Terminal tab
-    claude_cmd = "claude --dangerously-load-development-channels server:claude-peers"
-    wt_args = f"-w 0 new-tab --title \"{worker_name}\" --startingDirectory \"{worker_dir}\" cmd /k {claude_cmd}"
-    try:
-        subprocess.Popen(f"wt {wt_args}", shell=True)
-    except Exception as e:
-        error_response("SPAWN_FAILED", f"Worker起動に失敗しました: {e}", 500)
+    # Queue for batch launch (single wt command for reliable pane layout)
+    global _spawn_timer
+    _spawn_queue.append({
+        "name": worker_name,
+        "dir": str(worker_dir),
+        "num": next_num,
+    })
 
-    logger.info(f"Spawned {worker_name} for namespace {req.namespace}")
+    # Reset batch timer — flush after SPAWN_BATCH_DELAY seconds of no new requests
+    if _spawn_timer and not _spawn_timer.done():
+        _spawn_timer.cancel()
+    _spawn_timer = asyncio.create_task(_spawn_batch_timer())
+
+    logger.info(f"Queued {worker_name} for batch spawn (namespace={req.namespace})")
     return {"status": "ok", "worker_id": worker_name}
 
 
@@ -480,6 +591,7 @@ if __name__ == "__main__":
     parser.add_argument("--tsx-path", type=str, default=None, help="Path to tsx.cmd")
     parser.add_argument("--mode", type=str, default="HYBRID", help="Autonomy mode")
     parser.add_argument("--max-workers", type=int, default=8, help="Maximum number of workers")
+    parser.add_argument("--split", action="store_true", help="Use split panes instead of tabs for spawned workers")
     args = parser.parse_args()
 
     # Store spawn configuration
@@ -488,6 +600,7 @@ if __name__ == "__main__":
     _spawn_config["tsx_path"] = args.tsx_path
     _spawn_config["mode"] = args.mode
     _spawn_config["max_workers"] = args.max_workers
+    _spawn_config["split"] = args.split
 
     # Store port in app state for spawn endpoint
     app.state.port = args.port

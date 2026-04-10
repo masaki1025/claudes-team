@@ -71,16 +71,16 @@ claude`s team/
 
 ```powershell
 # PowerShell から
-.\start-peers.ps1                         # デフォルト: Dispatcherのみ起動, Worker は動的
-.\start-peers.ps1 -workers 3              # Worker 3体を事前起動
-.\start-peers.ps1 -workers 2 -split       # 事前起動 + 分割表示
+.\start-peers.ps1                         # デフォルト: Dispatcherのみ起動, Worker は動的, 分割表示
+.\start-peers.ps1 -workers 3              # Worker 3体を事前起動（分割表示）
+.\start-peers.ps1 -workers 3 -tabs        # Worker 3体を事前起動（タブ表示）
 .\start-peers.ps1 -mode FULL_AUTO         # 完全自律モード
 .\start-peers.ps1 -project my-app         # namespace を明示
 .\start-peers.ps1 -clean                  # 前回のセッション状態をリセットして起動
 
 # cmd から
 claude-peers.cmd -project my-app
-claude-peers.cmd -project my-app -workers 2 -split
+claude-peers.cmd -project my-app -workers 3
 ```
 
 ## 自律性モード
@@ -90,6 +90,28 @@ claude-peers.cmd -project my-app -workers 2 -split
 | MANUAL | 全ステップで承認を待つ | 高 |
 | HYBRID | タスク分解を提案→承認後に自動実行 | 中（デフォルト） |
 | FULL_AUTO | ゴールから結果まで完全自律 | 低 |
+
+## いつ使うべきか
+
+claude-peers は万能ではありません。タスク規模に応じて使い分けてください。
+
+| 判断基準 | claude-peers | 単体 Claude（サブエージェント） |
+|---|---|---|
+| ファイル数 | 20+ ファイル | ~15 ファイル以下 |
+| 作業時間 | 10分以上かかる見込み | 数分で完了する見込み |
+| ドメイン分離 | Backend/Frontend/テスト等が明確に分かれる | 密結合で分割しにくい |
+| 並列性 | 独立して同時進行できるタスクが3つ以上 | 直列依存が多い |
+| ビルド/テスト待ち | 長いビルドや外部API待ちがある | 即座に結果が出る |
+
+**claude-peers が向いているケース:**
+- マイクロサービスの複数サービス同時開発
+- フルスタックアプリの Backend + Frontend + テスト並行開発
+- 大規模リファクタリング（モジュール単位で分担可能）
+
+**単体 Claude で十分なケース:**
+- バグ修正、小機能追加（1-5ファイル）
+- 単一ドメインの実装
+- 調査・ドキュメント作成
 
 ## 前提条件
 
